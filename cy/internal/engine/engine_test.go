@@ -423,10 +423,99 @@ func TestEnginePersistsCancellationAndInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertLastRunFinished(t, records)
+	assertLastRunFinished(t, records, session.RunInterrupted)
 }
 
-func assertLastRunFinished(t *testing.T, records []session.Record) {
+func TestRunFinishedRecordsHowTheRunEnded(t *testing.T) {
+	t.Run("completed", func(t *testing.T) {
+		s := newTestSession(t)
+		model := &scriptedModel{streams: []llm.Stream{
+			&scriptedStream{chunks: []llm.StreamChunk{{Text: "done", FinishReason: llm.FinishReasonStop}}},
+		}}
+		engine, err := New(Config{Model: model, Session: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.Stream(context.Background(), "hello", nil); err != nil {
+			t.Fatal(err)
+		}
+		finished := lastRunFinished(t, s)
+		if finished.Outcome != session.RunCompleted || finished.Error != "" {
+			t.Fatalf("run_finished = %#v, want a clean completion", finished)
+		}
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		s := newTestSession(t)
+		model := &scriptedModel{streams: []llm.Stream{
+			&scriptedStream{finalErr: errors.New("provider hung up on sk-secret-token")},
+		}}
+		engine, err := New(Config{
+			Model:    model,
+			Session:  s,
+			Sanitize: func(text string) string { return strings.ReplaceAll(text, "sk-secret-token", "[redacted]") },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.Stream(context.Background(), "hello", nil); err == nil {
+			t.Fatal("Stream() error = nil, want the provider failure")
+		}
+		finished := lastRunFinished(t, s)
+		if finished.Outcome != session.RunFailed {
+			t.Fatalf("outcome = %q, want failed", finished.Outcome)
+		}
+		// The journal outlives the run and gets copied around, so what it keeps
+		// of an error is the sanitized text and not the original.
+		if !strings.Contains(finished.Error, "[redacted]") || strings.Contains(finished.Error, "sk-secret-token") {
+			t.Fatalf("recorded error = %q, want the sanitized text", finished.Error)
+		}
+	})
+
+	t.Run("interrupted", func(t *testing.T) {
+		s := newTestSession(t)
+		model := &scriptedModel{streams: []llm.Stream{&scriptedStream{finalErr: context.Canceled}}}
+		engine, err := New(Config{Model: model, Session: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.Stream(context.Background(), "hello", nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Stream() error = %v, want context.Canceled", err)
+		}
+		finished := lastRunFinished(t, s)
+		if finished.Outcome != session.RunInterrupted {
+			t.Fatalf("outcome = %q, want interrupted", finished.Outcome)
+		}
+	})
+}
+
+func newTestSession(t *testing.T) *session.Session {
+	t.Helper()
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func lastRunFinished(t *testing.T, s *session.Session) session.RunFinished {
+	t.Helper()
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) == 0 || records[len(records)-1].Type != session.RecordRunFinished {
+		t.Fatalf("last record = %#v, want run_finished", records)
+	}
+	finished, err := session.DecodePayload[session.RunFinished](records[len(records)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return finished
+}
+
+func assertLastRunFinished(t *testing.T, records []session.Record, want session.RunOutcome) {
 	t.Helper()
 	if len(records) == 0 || records[len(records)-1].Type != session.RecordRunFinished {
 		t.Fatalf("last record = %#v, want run_finished", records)
@@ -437,6 +526,9 @@ func assertLastRunFinished(t *testing.T, records []session.Record) {
 	}
 	if finished.RunID == "" {
 		t.Fatal("run_finished has an empty run ID")
+	}
+	if finished.Outcome != want {
+		t.Fatalf("outcome = %q, want %q", finished.Outcome, want)
 	}
 }
 

@@ -240,6 +240,79 @@ func TestOpenMarksInterruptedToolOutcomeUnknown(t *testing.T) {
 	}
 }
 
+func TestReconciledRunIsMarkedInterrupted(t *testing.T) {
+	home := t.TempDir()
+	s, err := Create(CreateOptions{Home: home, Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(RecordUserMessage, UserMessage{RunID: "run-1", Content: "run it"}); err != nil {
+		t.Fatal(err)
+	}
+	id := s.ID()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := Open(home, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Close()
+	records, err := resumed.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := records[len(records)-1]
+	if last.Type != RecordRunFinished {
+		t.Fatalf("last record = %q, want run_finished", last.Type)
+	}
+	finished, err := DecodePayload[RunFinished](last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.RunID != "run-1" || finished.Outcome != RunInterrupted {
+		t.Fatalf("run_finished = %#v, want run-1 interrupted", finished)
+	}
+	if finished.Error == "" {
+		t.Fatal("an interrupted run should say what happened to it")
+	}
+}
+
+// A journal written before Cy recorded outcomes still replays. The outcome is
+// absent rather than assumed, since those runs may have ended either way.
+func TestReplayAcceptsRunFinishedWithoutOutcome(t *testing.T) {
+	s, err := Create(CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Append(RecordUserMessage, UserMessage{RunID: "run-1", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(RecordRunFinished, map[string]string{"run_id": "run-1"}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(state.ActiveRuns) != 0 {
+		t.Fatalf("active runs = %#v, want the run closed", state.ActiveRuns)
+	}
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := DecodePayload[RunFinished](records[len(records)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Outcome != "" {
+		t.Fatalf("outcome = %q, want it left unset", finished.Outcome)
+	}
+}
+
 func TestClosePruningEmptyKeepsUsedSession(t *testing.T) {
 	home := t.TempDir()
 	empty, err := Create(CreateOptions{Home: home, Workspace: "/workspace"})

@@ -275,7 +275,7 @@ func (a *sessionAgent) runShell(ctx context.Context, command string, record bool
 			return "", toolruntime.ProcessResultMeta{}, err
 		}
 		if _, err := journal.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, ToolCalls: []llm.ToolCall{call}}); err != nil {
-			_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+			_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID, Outcome: session.RunFailed, Error: err.Error()})
 			a.mu.RUnlock()
 			return "", toolruntime.ProcessResultMeta{}, errors.Join(err, finishErr)
 		}
@@ -311,7 +311,16 @@ func (a *sessionAgent) runShell(ctx context.Context, command string, record bool
 			Content:    content,
 			Meta:       meta,
 		})
-		_, finishErr = journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+		// The run completed even when the command did not: a command that exits
+		// non-zero or is killed is an ordinary result for a shell the user asked
+		// for, and its fate is recorded in the tool result's meta. Failing to
+		// record that result is a different matter.
+		finished := session.RunFinished{RunID: runID, Outcome: session.RunCompleted}
+		if resultErr != nil {
+			finished.Outcome = session.RunFailed
+			finished.Error = resultErr.Error()
+		}
+		_, finishErr = journal.Append(session.RecordRunFinished, finished)
 	}
 	a.mu.RUnlock()
 

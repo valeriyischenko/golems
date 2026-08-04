@@ -230,7 +230,9 @@ func (s *Session) Reconcile() error {
 	}
 	sort.Strings(runIDs)
 	for _, runID := range runIDs {
-		if _, err := s.Append(RecordRunFinished, RunFinished{RunID: runID}); err != nil {
+		// The run is being closed by the next process to open the journal, so
+		// whatever it was doing did not finish.
+		if _, err := s.Append(RecordRunFinished, RunFinished{RunID: runID, Outcome: RunInterrupted, Error: "session ended before the run finished"}); err != nil {
 			return err
 		}
 	}

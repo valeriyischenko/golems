@@ -280,7 +280,7 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 		},
 		ToolExecution: e.toolExecutionHooks(runID),
 		Complete: func(turn *golem.Turn) error {
-			_, err := e.session.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+			_, err := e.session.Append(session.RecordRunFinished, session.RunFinished{RunID: runID, Outcome: session.RunCompleted})
 			return err
 		},
 		Fail: func(usage llm.Usage, cause error) error {
@@ -345,7 +345,18 @@ func (e *Engine) recordToolLimit(runID string, calls []llm.ToolCall, messages []
 
 func (e *Engine) failRun(runID string, _ llm.Usage, cause error) error {
 	safeCause := sanitizeError(cause, e.sanitize)
-	_, appendErr := e.session.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+	finished := session.RunFinished{RunID: runID, Outcome: session.RunFailed}
+	if safeCause != nil {
+		// The sanitized text rather than the original: journals are copied and
+		// read elsewhere, and an error can quote a URL or a header.
+		finished.Error = safeCause.Error()
+	}
+	// A cancelled run did not go wrong, it was stopped, and its journal should
+	// not read as though the model or a tool had failed.
+	if errors.Is(cause, context.Canceled) {
+		finished.Outcome = session.RunInterrupted
+	}
+	_, appendErr := e.session.Append(session.RecordRunFinished, finished)
 	return errors.Join(safeCause, appendErr)
 }
 

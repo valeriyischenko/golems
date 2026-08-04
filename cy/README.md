@@ -160,7 +160,9 @@ treated as untrusted.
 
 Interactive sessions are append-only JSONL journals under
 `$CY_HOME/sessions`. They contain prompts, responses, tool calls, and tool
-results verbatim; treat copied journals as secret-bearing data.
+results verbatim; treat copied journals as secret-bearing data. Each run is
+closed by a record saying how it ended — completed, failed, or interrupted —
+so a session that was cut short is distinguishable from one that finished.
 
 Cy loads the applicable `AGENTS.md` chain for the workspace. Context is
 compacted automatically when needed; `/context` shows the current budget and

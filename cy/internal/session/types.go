@@ -61,8 +61,24 @@ type ToolResult struct {
 	Meta       any    `json:"meta,omitempty"`
 }
 
+// RunOutcome says how a run ended. A record written before Cy recorded
+// outcomes carries none; that is distinct from a run that ended well.
+type RunOutcome string
+
+const (
+	RunCompleted   RunOutcome = "completed"
+	RunFailed      RunOutcome = "failed"
+	RunInterrupted RunOutcome = "interrupted"
+)
+
+// RunFinished closes a run. It carries how the run ended because the journal
+// is the whole account of it: without an outcome a crashed run, a cancelled
+// one, and a finished one are the same record, and a reader is left to infer
+// the difference from what is missing.
 type RunFinished struct {
-	RunID string `json:"run_id"`
+	RunID   string     `json:"run_id"`
+	Outcome RunOutcome `json:"outcome"`
+	Error   string     `json:"error,omitempty"`
 }
 
 // ToolResultsPruned records a provider-facing context boundary. Original tool
