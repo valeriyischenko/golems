@@ -41,6 +41,20 @@ func (r *Registry) WithProvider(name, token string, opts ...ProviderOption) *Reg
 	return r
 }
 
+// WithBaseURL points a provider at a different endpoint: a self-hosted or
+// proxied deployment, a local server on a non-default port, or a test double.
+// It is applied after the provider's own defaults, so it overrides them while
+// leaving that provider's headers and auth handling in place. An empty url is
+// ignored, so a caller may pass an optional configuration value through
+// unconditionally.
+func WithBaseURL(url string) ProviderOption {
+	return func(cfg *openai.ClientConfig) {
+		if url = strings.TrimSpace(url); url != "" {
+			cfg.BaseURL = url
+		}
+	}
+}
+
 // WithAppAttribution is purely for OpenRouter.
 func WithAppAttribution(title, url string) ProviderOption {
 	return func(cfg *openai.ClientConfig) {
