@@ -72,14 +72,17 @@ func providerEnvName(provider string) string {
 	return ""
 }
 
+// Classified where it is built rather than at each return, since both the
+// startup check and the per-turn one produce it and it is the same problem
+// either way: nothing to do but supply a credential and run again.
 func missingProviderCredentialError(provider, modelURI string) error {
-	return fmt.Errorf(
+	return asConfigError(fmt.Errorf(
 		"%s API key is empty for model %q; set %s or use /login %s in interactive Cy",
 		provider,
 		modelURI,
 		providerEnvName(provider),
 		provider,
-	)
+	))
 }
 
 func listProviderStatus(store *state.Store) ([]providerStatus, error) {

@@ -27,7 +27,7 @@ func main() {
 	}
 	if err := runMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "cy: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -70,21 +70,21 @@ func runMain() (returnErr error) {
 	cfg.JSON = *jsonOutput
 	window, err := normalizeContextWindow(*contextWindow)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	cfg.ContextWindow = window
 	normalizedProfile, err := toolruntime.NormalizeCapabilityProfile(*profile)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	cfg.CapabilityProfile = normalizedProfile
 	cfg.SandboxPolicy, err = normalizeSandboxPolicy(*sandbox)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	cfg.TerminalTheme, err = normalizeTerminalTheme(*theme)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	store, err := state.Open(cfg.Home)
 	if err != nil {
@@ -101,13 +101,13 @@ func runMain() (returnErr error) {
 	if !setFlags["profile"] && strings.TrimSpace(os.Getenv("CY_PROFILE")) == "" && storedSettings.Profile != "" {
 		cfg.CapabilityProfile, err = toolruntime.NormalizeCapabilityProfile(storedSettings.Profile)
 		if err != nil {
-			return fmt.Errorf("load saved profile: %w", err)
+			return asConfigError(fmt.Errorf("load saved profile: %w", err))
 		}
 	}
 	if !setFlags["sandbox"] && strings.TrimSpace(os.Getenv("CY_SANDBOX")) == "" && storedSettings.Sandbox != "" {
 		cfg.SandboxPolicy, err = normalizeSandboxPolicy(storedSettings.Sandbox)
 		if err != nil {
-			return fmt.Errorf("load saved sandbox policy: %w", err)
+			return asConfigError(fmt.Errorf("load saved sandbox policy: %w", err))
 		}
 	}
 
@@ -170,7 +170,7 @@ func runMain() (returnErr error) {
 	}
 	cfg.Security = buildSecurityState(ctx, cfg, root, store)
 	if cfg.Security.EffectivePolicy == sandboxOn && !cfg.Security.Active() {
-		return fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe)
+		return asConfigError(fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe))
 	}
 	// The interactive UI must be able to start without a credential so the
 	// user can authenticate with /login. sessionAgent checks the credential at
@@ -180,7 +180,7 @@ func runMain() (returnErr error) {
 		return fmt.Errorf("initialize model: %w", err)
 	}
 	if journal != nil && resumed.Header.Workspace != "" && root != resumed.Header.Workspace {
-		return fmt.Errorf("session workspace is %s, not %s", resumed.Header.Workspace, root)
+		return asConfigError(fmt.Errorf("session workspace is %s, not %s", resumed.Header.Workspace, root))
 	}
 	if journal == nil {
 		sessionHome := cfg.Home
@@ -242,7 +242,7 @@ func runMain() (returnErr error) {
 
 	inFile, outFile, ok := ui.CanUseScreen(os.Stdin, os.Stdout)
 	if !ok {
-		return errors.New("interactive mode requires a terminal; use ssh -t, allocate a TTY, or pass a prompt")
+		return asConfigError(errors.New("interactive mode requires a terminal; use ssh -t, allocate a TTY, or pass a prompt"))
 	}
 	return ui.RunScreen(ctx, agent, ui.Config{
 		ModelURI:          cfg.ModelURI,

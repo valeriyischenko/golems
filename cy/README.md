@@ -54,6 +54,19 @@ the session context:
 !go test ./cy/...
 ```
 
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Failure that does not fit the classes below |
+| 2 | Invocation or configuration: a bad flag or setting, a missing credential, a required sandbox that is unavailable. Rerunning unchanged will fail the same way |
+| 3 | The provider rejected or could not serve the request |
+| 130 | Interrupted |
+
+The class is decided by the kind of failure, not by matching its message, so
+the wording of an error may change without changing what a script does.
+
 ### Models and credentials
 
 Use `/login` and `/logout` in the interactive UI to manage credentials. Use
