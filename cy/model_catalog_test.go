@@ -104,3 +104,21 @@ func TestKnownModelsIncludesRecentSelections(t *testing.T) {
 		t.Fatalf("default model appears %d times in %#v", count, models)
 	}
 }
+
+func TestResolveModelSpecForAppliesConfiguredContextWindow(t *testing.T) {
+	uri := "openai/local-model"
+	unknown := resolveModelSpecFor(Config{}, uri, nil, false)
+	if unknown.ContextWindow != unknownModelContextWindow || !unknown.Estimated {
+		t.Fatalf("model spec without an override = %#v", unknown)
+	}
+
+	spec := resolveModelSpecFor(Config{ContextWindow: 262144}, uri, nil, false)
+	if spec.ContextWindow != 262144 || spec.Estimated {
+		t.Fatalf("model spec with an override = %#v", spec)
+	}
+
+	known := resolveModelSpecFor(Config{ContextWindow: 262144}, "deepseek/deepseek-v4-flash", nil, false)
+	if known.ContextWindow != 262144 {
+		t.Fatalf("override did not replace a catalog entry: %#v", known)
+	}
+}

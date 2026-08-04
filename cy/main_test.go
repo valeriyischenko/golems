@@ -76,6 +76,34 @@ func TestNormalizeTerminalTheme(t *testing.T) {
 	}
 }
 
+func TestNormalizeContextWindow(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  int
+	}{
+		{input: "", want: 0},
+		{input: " 262144 ", want: 262144},
+	} {
+		got, err := normalizeContextWindow(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizeContextWindow(%q) = %d, %v; want %d", test.input, got, err, test.want)
+		}
+	}
+	for _, input := range []string{"lots", "0", "-1", "128k"} {
+		if _, err := normalizeContextWindow(input); err == nil {
+			t.Fatalf("normalizeContextWindow(%q) accepted a value that is not a positive token count", input)
+		}
+	}
+}
+
+func TestBuildModelWithBaseURLDoesNotRequireProviderCredential(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	cfg := Config{ModelURI: "openai/local-model", BaseURL: "http://127.0.0.1:8011/v1"}
+	if _, err := buildModel(cfg, nil, true); err != nil {
+		t.Fatalf("buildModel() with a replaced endpoint = %v", err)
+	}
+}
+
 func TestRunPrintTurnJSONWritesOneFinalResult(t *testing.T) {
 	agent := sessionTaggedAgent{agentRunner: printTurnAgent(t), id: "saved-session"}
 	var stdout, stderr bytes.Buffer

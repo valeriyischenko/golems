@@ -140,7 +140,7 @@ func (a *sessionAgent) reloadModel(uri, effort string, selected bool) error {
 	if err != nil {
 		return err
 	}
-	spec := resolveModelSpec(uri, a.state, selected)
+	spec := resolveModelSpecFor(cfg, uri, a.state, selected)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -500,7 +500,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		_ = processes.Close()
 		return nil, nil, err
 	}
-	spec := resolveModelSpec(cfg.ModelURI, a.state, false)
+	spec := resolveModelSpecFor(cfg, cfg.ModelURI, a.state, false)
 	eng, err := engine.New(engine.Config{
 		Model:              model,
 		Session:            journal,

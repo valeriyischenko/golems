@@ -36,6 +36,8 @@ func runMain() (returnErr error) {
 	cfg := LoadConfig()
 
 	modelURI := flag.String("model", cfg.ModelURI, "model URI in provider/model format")
+	baseURL := flag.String("base-url", cfg.BaseURL, "override the provider endpoint, for a self-hosted or proxied deployment")
+	contextWindow := flag.String("context-window", os.Getenv("CY_CONTEXT_WINDOW"), "context window in tokens, for a model Cy has no entry for")
 	systemPrompt := flag.String("system-prompt", cfg.SystemPrompt, "replace the built-in system prompt")
 	rootDir := flag.String("root", cfg.RootDir, "workspace root for file and search tools")
 	home := flag.String("home", cfg.Home, "Cy home directory (defaults to CY_HOME or ~/.cy)")
@@ -59,12 +61,18 @@ func runMain() (returnErr error) {
 		return nil
 	}
 	cfg.ModelURI = strings.TrimSpace(*modelURI)
+	cfg.BaseURL = strings.TrimSpace(*baseURL)
 	cfg.SystemPrompt = *systemPrompt
 	cfg.RootDir = *rootDir
 	cfg.Home = *home
 	cfg.Verbose = *verbose
 	cfg.SaveSession = *saveSession
 	cfg.JSON = *jsonOutput
+	window, err := normalizeContextWindow(*contextWindow)
+	if err != nil {
+		return err
+	}
+	cfg.ContextWindow = window
 	normalizedProfile, err := toolruntime.NormalizeCapabilityProfile(*profile)
 	if err != nil {
 		return err
@@ -263,6 +271,12 @@ func buildModel(cfg Config, store *state.Store, requireCredential bool) (llm.Mod
 		return llm.Model{}, fmt.Errorf("invalid model URI %q; expected provider/model", cfg.ModelURI)
 	}
 
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	var opts []llm.ProviderOption
+	if baseURL != "" {
+		opts = append(opts, llm.WithBaseURL(baseURL))
+	}
+
 	registry := llm.NewRegistry()
 	switch provider {
 	case "deepseek", "openai", "openrouter":
@@ -270,16 +284,19 @@ func buildModel(cfg Config, store *state.Store, requireCredential bool) (llm.Mod
 		if err != nil {
 			return llm.Model{}, err
 		}
-		if requireCredential && token == "" {
+		// A replaced endpoint is not the provider's, so it need not hold the
+		// provider's credential: a local or proxied deployment may accept any
+		// token or none. Whatever is configured is still sent, since some
+		// proxies do check it.
+		if requireCredential && token == "" && baseURL == "" {
 			return llm.Model{}, missingProviderCredentialError(provider, cfg.ModelURI)
 		}
 		if provider == "openrouter" {
-			registry.WithProvider(provider, token, llm.WithAppAttribution("Cy", "https://github.com/levmv/golems"))
-		} else {
-			registry.WithProvider(provider, token)
+			opts = append(opts, llm.WithAppAttribution("Cy", "https://github.com/levmv/golems"))
 		}
+		registry.WithProvider(provider, token, opts...)
 	case "ollama":
-		registry.WithProvider(provider, "ollama")
+		registry.WithProvider(provider, "ollama", opts...)
 	default:
 		return llm.Model{}, fmt.Errorf("unsupported provider %q", provider)
 	}

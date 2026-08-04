@@ -101,6 +101,8 @@ Flags override environment variables, which override saved defaults.
 | Flag | Environment | Purpose |
 | --- | --- | --- |
 | `--model` | `CY_MODEL` | Model URI in `provider/model` form |
+| `--base-url` | `CY_BASE_URL` | Provider endpoint, for a self-hosted or proxied deployment |
+| `--context-window` | `CY_CONTEXT_WINDOW` | Context window in tokens, for a model Cy has no entry for |
 | `--system-prompt` | `CY_SYSTEM_PROMPT` | Replace the built-in system prompt |
 | `--root` | `CY_ROOT` | Workspace available to tools |
 | `--home` | `CY_HOME` | Credentials, sessions, and tool state |
@@ -114,6 +116,13 @@ background and falls back to the light palette when no answer is available.
 
 `--system-prompt` replaces the built-in prompt for the current invocation.
 Applicable `AGENTS.md` instructions are still loaded separately.
+
+`--base-url` points the chosen provider at a different OpenAI-compatible
+endpoint while keeping that provider's headers and authentication. Since the
+endpoint is no longer the provider's, its credential stops being required; any
+key that is configured is still sent, because some proxies check it. A model
+served this way has no catalog entry, so `--context-window` is how Cy learns
+its size — otherwise it assumes 128k, which decides when context is compacted.
 
 ## Tools and profiles
 

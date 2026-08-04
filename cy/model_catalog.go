@@ -58,6 +58,19 @@ func resolveModelSpec(uri string, store *state.Store, refresh bool) modelSpec {
 	return resolveModelSpecWithLookup(uri, store, refresh, openRouterContextWindow)
 }
 
+// resolveModelSpecFor resolves a model and then applies an explicit context
+// window from configuration. Without one, a model the catalog does not list
+// falls back to a guess that drives compaction timing, and the guess cannot be
+// corrected: a self-hosted deployment has no catalog entry to look up.
+func resolveModelSpecFor(cfg Config, uri string, store *state.Store, refresh bool) modelSpec {
+	spec := resolveModelSpec(uri, store, refresh)
+	if cfg.ContextWindow > 0 {
+		spec.ContextWindow = cfg.ContextWindow
+		spec.Estimated = false
+	}
+	return spec
+}
+
 func resolveModelSpecWithLookup(uri string, store *state.Store, refresh bool, lookup modelContextLookup) modelSpec {
 	model := strings.ToLower(strings.TrimSpace(uri))
 	if modelID, ok := strings.CutPrefix(model, "openrouter/"); ok {
