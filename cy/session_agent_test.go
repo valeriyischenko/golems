@@ -512,6 +512,41 @@ func TestSessionAgentMissingCredentialFailsAtModelCallBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionAgentConfiguredBaseURLDoesNotRequireProviderCredential(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	home := t.TempDir()
+	root := t.TempDir()
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: "deepseek/deepseek-v4-flash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &runTurnFakeModel{streams: [][]llm.StreamChunk{{{
+		Text: "ack", FinishReason: llm.FinishReasonStop,
+	}}}}
+	cfg := Config{
+		Home:              home,
+		ModelURI:          "deepseek/deepseek-v4-flash",
+		BaseURL:           "http://127.0.0.1:9099/v1",
+		CapabilityProfile: "full",
+		SandboxPolicy:     sandboxOff,
+	}
+	agent, err := newSessionAgent(cfg, model, root, nil, journal, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	// The credential is checked once more at the model call boundary, which is
+	// the check a session reaches when it is already running.
+	if _, err := agent.Stream(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("Stream() error = %v, want the turn to proceed without a provider credential", err)
+	}
+}
+
 func TestSessionAgentClearAndResumeSwitchDurableRuntime(t *testing.T) {
 	home := t.TempDir()
 	root := t.TempDir()

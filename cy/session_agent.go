@@ -768,11 +768,19 @@ func (a *sessionAgent) Compact(ctx context.Context, focus string) (engine.Contex
 func (a *sessionAgent) requireModelCredential() error {
 	a.mu.RLock()
 	uri := a.cfg.ModelURI
+	baseURL := strings.TrimSpace(a.cfg.BaseURL)
 	store := a.state
 	a.mu.RUnlock()
 
 	provider := modelProvider(uri)
 	if !isModelLoginProvider(provider) {
+		return nil
+	}
+	// A replaced endpoint is not the provider's, so it need not hold the
+	// provider's credential, on the same grounds as in buildModel. This check
+	// is separate because it runs before every turn rather than once at
+	// startup, and a session may switch models while it runs.
+	if baseURL != "" {
 		return nil
 	}
 	token, _, err := credentialForProvider(store, provider)
