@@ -53,6 +53,11 @@ type ChatCompletionMessage struct {
 	// which is not in the official documentation.
 	// the doc from deepseek:
 	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
+	//
+	// Servers do not agree on the name: DeepSeek returns reasoning_content,
+	// while vLLM and OpenRouter return reasoning. Both are decoded into this
+	// field; requests keep sending reasoning_content, which every one of them
+	// accepts.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
 	// ToolCalls contains the tools the model wants to call (only valid for Role=assistant).
@@ -95,13 +100,20 @@ func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
 	type Alias ChatCompletionMessage
 	aux := struct {
 		*Alias
-		Content json.RawMessage `json:"content"`
+		Content   json.RawMessage `json:"content"`
+		Reasoning string          `json:"reasoning"`
 	}{
 		Alias: (*Alias)(m),
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
+	}
+
+	// reasoning_content takes precedence, so a server sending both is read the
+	// way it was before this alias existed.
+	if m.ReasoningContent == "" {
+		m.ReasoningContent = aux.Reasoning
 	}
 
 	contentBytes := bytes.TrimSpace(aux.Content)

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 )
 
@@ -15,7 +16,31 @@ type ChatCompletionStreamChoiceDelta struct {
 	// which is not in the official documentation.
 	// the doc from deepseek:
 	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
+	//
+	// As in ChatCompletionMessage, a delta naming it reasoning is decoded here
+	// too, so a caller reads one field whichever server produced the stream.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+func (d *ChatCompletionStreamChoiceDelta) UnmarshalJSON(data []byte) error {
+	// Decoded in two passes rather than through an embedded alias struct: a
+	// decode error names the path it failed on, and an embedded field would
+	// insert its own Go name into that path, in an error a user reads.
+	type plain ChatCompletionStreamChoiceDelta
+	if err := json.Unmarshal(data, (*plain)(d)); err != nil {
+		return err
+	}
+	if d.ReasoningContent != "" {
+		return nil
+	}
+	var alias struct {
+		Reasoning string `json:"reasoning"`
+	}
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	d.ReasoningContent = alias.Reasoning
+	return nil
 }
 
 type ChatCompletionStreamChoiceLogprobs struct {
