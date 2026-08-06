@@ -31,8 +31,17 @@ type Config struct {
 	ContextEstimated   bool
 	Tools              []golem.Tool
 	RequestPolicy      golem.RequestPolicy
-	BoundaryEvents     func(runID string) ([]string, error)
+	BoundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	Sanitize           func(string) string
+}
+
+// BoundaryEvent is something that happened outside the conversation and has to
+// be told to the model at the next turn boundary. JobID names the background job
+// it reports on, where there is one; it travels beside the text so that the
+// journal can record which job was reported without parsing the sentence.
+type BoundaryEvent struct {
+	JobID   string
+	Content string
 }
 
 // Engine is a TUI-independent, stepwise executor. The journal is authoritative:
@@ -50,7 +59,7 @@ type Engine struct {
 	tools              []llm.Tool
 	toolSet            *golem.ToolSet
 	requestPolicy      golem.RequestPolicy
-	boundaryEvents     func(runID string) ([]string, error)
+	boundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	sanitize           func(string) string
 	contextWindow      int
 	contextEstimated   bool
@@ -242,26 +251,42 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 
 	runtime := golem.TurnRuntime{
 		PrepareContext: func(ctx context.Context, _ int, _ []llm.Message) ([]llm.Message, error) {
-			var boundaryMessages []string
+			var boundary []BoundaryEvent
 			if e.boundaryEvents != nil {
 				events, err := e.boundaryEvents(runID)
 				if err != nil {
 					return nil, err
 				}
 				if emit != nil {
-					for _, text := range events {
-						emit(golem.StreamEvent{Kind: golem.EventStatus, Text: e.sanitize(text)})
+					for _, event := range events {
+						emit(golem.StreamEvent{Kind: golem.EventStatus, Text: e.sanitize(event.Content)})
 					}
 				}
-				boundaryMessages = events
+				boundary = events
 			}
 			if err := e.deliverQueuedInput(runID); err != nil {
 				return nil, err
 			}
-			messages, _, err := e.prepareContext(ctx)
-			for _, text := range boundaryMessages {
-				messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: e.sanitize(text)})
+			// Written after the queued input so the context still reads in the
+			// order it did when these were appended by hand: what the user typed
+			// while the turn was waiting, then what finished behind it. Written
+			// at all so that prepareContext can build them from the journal like
+			// every other message, instead of them being pasted onto the end of
+			// a context the journal does not agree with.
+			//
+			// Redacted going in. The text is the only message content Cy masks,
+			// and a credential the model never saw does not belong in the file
+			// that outlives the run either.
+			for _, event := range boundary {
+				if _, err := e.session.Append(session.RecordBoundaryEvent, session.BoundaryEvent{
+					RunID:   runID,
+					JobID:   event.JobID,
+					Content: e.sanitize(event.Content),
+				}); err != nil {
+					return nil, err
+				}
 			}
+			messages, _, err := e.prepareContext(ctx)
 			return messages, err
 		},
 		Request: requester.Request,

@@ -392,9 +392,17 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 	close(job.done)
 }
 
+// CompletionEvent is one background job reporting that it finished. The id
+// travels beside the text, rather than only inside it, so a caller can record
+// which job was reported without reading the sentence back.
+type CompletionEvent struct {
+	JobID   string
+	Content string
+}
+
 // DeliverCompletionEvents reports unobserved background completions once for
 // the lifetime of this Cy process. Nothing is persisted across restarts.
-func (m *processManager) DeliverCompletionEvents(_ string) ([]string, error) {
+func (m *processManager) DeliverCompletionEvents(_ string) ([]CompletionEvent, error) {
 	m.mu.Lock()
 	jobs := make([]*processJob, 0, len(m.jobs))
 	for _, job := range m.jobs {
@@ -403,7 +411,7 @@ func (m *processManager) DeliverCompletionEvents(_ string) ([]string, error) {
 	m.mu.Unlock()
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].startedAt.Before(jobs[j].startedAt) })
 
-	var delivered []string
+	var delivered []CompletionEvent
 	for _, job := range jobs {
 		job.mu.Lock()
 		if job.status == jobRunning || job.completionSeen {
@@ -424,7 +432,7 @@ func (m *processManager) DeliverCompletionEvents(_ string) ([]string, error) {
 			content += ", error=" + errText
 		}
 		content += ". Inspect output with job(action=\"output\", job_id=\"" + id + "\")."
-		delivered = append(delivered, content)
+		delivered = append(delivered, CompletionEvent{JobID: id, Content: content})
 	}
 	return delivered, nil
 }

@@ -669,3 +669,87 @@ func (s *scriptedStream) Close() error {
 	s.closed = true
 	return nil
 }
+
+func TestEngineJournalsBoundaryEventsItDelivers(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	model := &scriptedModel{chatResponses: []*llm.Response{{Content: "noted"}}}
+	event := BoundaryEvent{JobID: "job-4f2a", Content: "Background job job-4f2a completed: status=failed, error=token s3cret rejected."}
+	served := false
+	eng, err := New(Config{
+		Model:   model,
+		Session: s,
+		BoundaryEvents: func(string) ([]BoundaryEvent, error) {
+			if served {
+				return nil, nil
+			}
+			served = true
+			return []BoundaryEvent{event}, nil
+		},
+		Sanitize: func(text string) string { return strings.ReplaceAll(text, "s3cret", "[REDACTED]") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Stream(context.Background(), "start", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.ReplaceAll(event.Content, "s3cret", "[REDACTED]")
+
+	requests := model.requests
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	messages := requests[0].Messages
+	last := messages[len(messages)-1]
+	if last.Role != llm.RoleSystem || last.Content != want {
+		t.Fatalf("last message the model saw = %#v, want the redacted boundary event", last)
+	}
+
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded []session.BoundaryEvent
+	for _, record := range records {
+		if record.Type != session.RecordBoundaryEvent {
+			continue
+		}
+		payload, err := session.DecodePayload[session.BoundaryEvent](record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorded = append(recorded, payload)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("boundary_event records = %d, want 1", len(recorded))
+	}
+	if recorded[0].JobID != "job-4f2a" {
+		t.Fatalf("recorded job id = %q, want the job the event reported on", recorded[0].JobID)
+	}
+	if recorded[0].Content != want {
+		t.Fatalf("recorded content = %q, want it redacted", recorded[0].Content)
+	}
+	if recorded[0].RunID == "" {
+		t.Fatal("recorded boundary event has no run id")
+	}
+
+	// The point of the record: a reconstruction of the session has to show the
+	// model being told, or a replay shows it reacting to something it never saw.
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range state.Messages {
+		if message.Role == llm.RoleSystem && message.Content == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("boundary event missing from replayed messages: %#v", state.Messages)
+	}
+}

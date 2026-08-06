@@ -156,6 +156,17 @@ func applyRecord(state *State, record Record) error {
 		}
 		copy := payload
 		state.ToolPruning = &copy
+	case RecordBoundaryEvent:
+		payload, err := DecodePayload[BoundaryEvent](record)
+		if err != nil {
+			return decodeError(record, err)
+		}
+		if strings.TrimSpace(payload.Content) == "" {
+			return fmt.Errorf("boundary event at sequence %d has no content", record.Seq)
+		}
+		state.Messages = append(state.Messages, llm.Message{Role: llm.RoleSystem, Content: payload.Content, CreatedAt: record.Timestamp})
+		state.MessageSeqs = append(state.MessageSeqs, record.Seq)
+		state.MessageRunIDs = append(state.MessageRunIDs, payload.RunID)
 	case RecordCompactionCompleted:
 		payload, err := DecodePayload[CompactionCompleted](record)
 		if err != nil {

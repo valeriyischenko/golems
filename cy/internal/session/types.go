@@ -18,6 +18,7 @@ const (
 	RecordRunFinished         RecordType = "run_finished"
 	RecordToolResultsPruned   RecordType = "tool_results_pruned"
 	RecordCompactionCompleted RecordType = "compaction_completed"
+	RecordBoundaryEvent       RecordType = "boundary_event"
 )
 
 // Record is one append-only session event. Sequence numbers are sufficient to
@@ -94,6 +95,26 @@ type CompactionCompleted struct {
 	FirstVerbatimSeq  uint64    `json:"first_verbatim_seq"`
 	Summary           string    `json:"summary"`
 	Usage             llm.Usage `json:"usage"`
+}
+
+// BoundaryEvent is a message put into context at a turn boundary by Cy itself,
+// rather than by the user or the model. Today the only source is a background
+// job reporting that it finished, which the model has to be told about because
+// nothing in the conversation would otherwise mention it.
+//
+// It is a record because the journal is the whole account of the run. Delivered
+// and not recorded, such a message is in the model's context on the turn it is
+// delivered and gone from every reconstruction afterwards, so a replay shows the
+// model reacting to something it was never told.
+//
+// JobID names the job the event reports on. It is separate from Content rather
+// than only spelled inside it so that a delivery can be matched to the tool call
+// that started the job — the call's own record already carries the id in its
+// result metadata — without parsing prose.
+type BoundaryEvent struct {
+	RunID   string `json:"run_id"`
+	JobID   string `json:"job_id,omitempty"`
+	Content string `json:"content"`
 }
 
 func DecodePayload[T any](record Record) (T, error) {

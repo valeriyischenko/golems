@@ -530,7 +530,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 			MaxDelay:          time.Minute,
 			StreamIdleTimeout: 5 * time.Minute,
 		},
-		BoundaryEvents: processes.DeliverCompletionEvents,
+		BoundaryEvents: boundaryEventsFrom(processes),
 		Sanitize:       a.masker.Redact,
 	})
 	if err != nil {
@@ -538,6 +538,24 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		return nil, nil, fmt.Errorf("initialize engine: %w", err)
 	}
 	return eng, processes, nil
+}
+
+// boundaryEventsFrom adapts the process manager's completions to what the
+// engine journals. The two types are deliberately separate: the process manager
+// knows about jobs and nothing about sessions, and this is the one place that
+// is allowed to know about both.
+func boundaryEventsFrom(processes *toolruntime.ProcessManager) func(string) ([]engine.BoundaryEvent, error) {
+	return func(runID string) ([]engine.BoundaryEvent, error) {
+		completions, err := processes.DeliverCompletionEvents(runID)
+		if err != nil {
+			return nil, err
+		}
+		events := make([]engine.BoundaryEvent, 0, len(completions))
+		for _, completion := range completions {
+			events = append(events, engine.BoundaryEvent{JobID: completion.JobID, Content: completion.Content})
+		}
+		return events, nil
+	}
 }
 
 func runtimeSandboxPolicy(cfg Config) string {
