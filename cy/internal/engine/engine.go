@@ -322,9 +322,13 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 		},
 	})
 	if err != nil {
-		return nil, e.failRun(runID, llm.Usage{}, err)
+		return nil, e.failRun(runID, llm.Usage{}, err, false)
 	}
 
+	// Set when the fuse blows and read when the run closes. A local rather than
+	// engine state: both closures belong to this turn, and the turn holds turnMu
+	// for its whole length, so there is no second run to confuse it with.
+	toolLimitReached := false
 	runtime := golem.TurnRuntime{
 		PrepareContext: func(ctx context.Context, _ int, _ []llm.Message) ([]llm.Message, error) {
 			var boundary []BoundaryEvent
@@ -377,15 +381,20 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 			return err
 		},
 		RecordToolLimit: func(calls []llm.ToolCall, messages []llm.Message, steps []golem.Step) error {
+			toolLimitReached = true
 			return e.recordToolLimit(runID, calls, messages, steps)
 		},
 		ToolExecution: e.toolExecutionHooks(runID),
 		Complete: func(turn *golem.Turn) error {
-			_, err := e.session.Append(session.RecordRunFinished, session.RunFinished{RunID: runID, Outcome: session.RunCompleted})
+			_, err := e.session.Append(session.RecordRunFinished, session.RunFinished{
+				RunID:            runID,
+				Outcome:          session.RunCompleted,
+				ToolLimitReached: toolLimitReached,
+			})
 			return err
 		},
 		Fail: func(usage llm.Usage, cause error) error {
-			return e.failRun(runID, usage, cause)
+			return e.failRun(runID, usage, cause, toolLimitReached)
 		},
 	}
 	turn, err := golem.RunTurn(ctx, golem.TurnConfig{
@@ -444,9 +453,9 @@ func (e *Engine) recordToolLimit(runID string, calls []llm.ToolCall, messages []
 	return nil
 }
 
-func (e *Engine) failRun(runID string, _ llm.Usage, cause error) error {
+func (e *Engine) failRun(runID string, _ llm.Usage, cause error, toolLimitReached bool) error {
 	safeCause := sanitizeError(cause, e.sanitize)
-	finished := session.RunFinished{RunID: runID, Outcome: session.RunFailed}
+	finished := session.RunFinished{RunID: runID, Outcome: session.RunFailed, ToolLimitReached: toolLimitReached}
 	if safeCause != nil {
 		// The sanitized text rather than the original: journals are copied and
 		// read elsewhere, and an error can quote a URL or a header.

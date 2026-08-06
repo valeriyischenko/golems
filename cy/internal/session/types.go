@@ -126,6 +126,18 @@ type RunFinished struct {
 	RunID   string     `json:"run_id"`
 	Outcome RunOutcome `json:"outcome"`
 	Error   string     `json:"error,omitempty"`
+	// ToolLimitReached says the per-turn tool iteration fuse blew. It is a
+	// separate field and not an outcome because the run really did complete: the
+	// fuse ends a turn by withholding the tools and asking the model to answer
+	// with what it has, and if it answers, the run closes as "completed" like any
+	// other. The reply is then a summary of the work reached rather than the work
+	// asked for, and nothing in the record said so -- the evidence was the prose
+	// of a synthetic tool result, which is readable but not queryable.
+	//
+	// Absent on a run that was reconciled after a crash, where nobody observed
+	// the turn. That is the same silence as an outcome-less record, not a claim
+	// the fuse held.
+	ToolLimitReached bool `json:"tool_limit_reached,omitempty"`
 }
 
 // ToolResultsPruned records a provider-facing context boundary. Original tool

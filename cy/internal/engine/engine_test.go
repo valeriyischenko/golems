@@ -933,6 +933,45 @@ func TestEngineStopsToolCallsAtTheConfiguredFuse(t *testing.T) {
 	if limits != 1 {
 		t.Fatalf("journalled tool-limit results = %d, want 1", limits)
 	}
+	// The outcome is "completed", which is true and is not the whole story. A
+	// reader asking whether this run was cut off should not have to grep the
+	// prose of a synthetic tool result to find out.
+	finished := lastRunFinished(t, s)
+	if finished.Outcome != session.RunCompleted {
+		t.Fatalf("outcome = %q, want the run to close as completed", finished.Outcome)
+	}
+	if !finished.ToolLimitReached {
+		t.Fatal("run_finished does not record that the tool fuse blew")
+	}
+}
+
+func TestRunFinishedDoesNotClaimAFuseThatHeld(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tool := golem.FunctionToolWithEffect(golem.ToolEffectRead, "read", "read", jsonschema.Object(nil), func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+		return golem.ToolResult{Content: "contents"}, nil
+	})
+	engine, err := New(Config{Model: &fuseModel{}, Session: s, Tools: []golem.Tool{tool}, MaxToolIterations: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Stream(context.Background(), "keep going", nil); err != nil {
+		t.Fatal(err)
+	}
+	// A second run on the same engine. The flag belongs to the turn, so a turn
+	// that never tripped must not inherit the previous one's.
+	engine.model = &scriptedModel{streams: []llm.Stream{
+		&scriptedStream{chunks: []llm.StreamChunk{{Text: "done", FinishReason: llm.FinishReasonStop}}},
+	}}
+	if _, err := engine.Stream(context.Background(), "one more", nil); err != nil {
+		t.Fatal(err)
+	}
+	if finished := lastRunFinished(t, s); finished.ToolLimitReached {
+		t.Fatal("a run that never reached the fuse is recorded as having blown it")
+	}
 }
 
 // fuseModel asks for a tool for as long as it is allowed one, so the turn ends
