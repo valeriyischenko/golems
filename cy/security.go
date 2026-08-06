@@ -114,6 +114,29 @@ func unavailableSandbox(state SecurityState, probe string) SecurityState {
 
 func (s SecurityState) Active() bool { return s.Backend != "" }
 
+// sandboxUnavailableNotice reports what to say when the run asked for a sandbox
+// and is not getting one. It returns "" when there is nothing to report: when
+// the fence is in place, when it was switched off deliberately, or when the
+// interactive startup line is showing the state anyway.
+//
+// The case it exists for is a scripted run under the default policy, which
+// falls back to no sandbox at all and today says so nowhere. Both ways of
+// arriving there are worth a line, since neither was asked for by name: a
+// probe that did not come back clean, and a container Cy decided to trust.
+func sandboxUnavailableNotice(cfg Config) string {
+	if !cfg.PrintMode || cfg.SandboxPolicy != sandboxAuto || cfg.Security.Active() {
+		return ""
+	}
+	if cfg.Security.Container != "" {
+		return fmt.Sprintf("sandbox off, trusting the %s container instead", cfg.Security.Container)
+	}
+	notice := "sandbox unavailable, continuing without one"
+	if cfg.Security.Probe != "" {
+		notice += ": " + cfg.Security.Probe
+	}
+	return notice
+}
+
 func effectiveSandboxPolicy(requested, container string) string {
 	if requested == sandboxAuto && container != "" {
 		return sandboxOff

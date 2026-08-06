@@ -185,7 +185,11 @@ saved session context.
 
 The intended boundary is filesystem access. Network remains open, and Cy does
 not parse commands or mediate their semantic effects. The interactive startup
-line reports the effective backend and network state.
+line reports the effective backend and network state. A non-interactive run has
+no such line, so when `auto` ends up without a sandbox — because the probe did
+not come back clean, or because a trusted container was detected — it says so on
+stderr; stdout, including `--json`, is unaffected. A run that must not proceed
+unsandboxed should use `on`, which fails instead.
 
 ## Development
 

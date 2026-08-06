@@ -172,6 +172,9 @@ func runMain() (returnErr error) {
 	if cfg.Security.EffectivePolicy == sandboxOn && !cfg.Security.Active() {
 		return asConfigError(fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe))
 	}
+	if notice := sandboxUnavailableNotice(cfg); notice != "" {
+		fmt.Fprintf(os.Stderr, "cy: %s\n", notice)
+	}
 	// The interactive UI must be able to start without a credential so the
 	// user can authenticate with /login. sessionAgent checks the credential at
 	// the model-call boundary, before anything is appended to the journal.

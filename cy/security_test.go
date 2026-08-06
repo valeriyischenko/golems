@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,65 @@ func TestSecuritySummaryIncludesAutoContainer(t *testing.T) {
 	state := SecurityState{Container: "podman"}
 	if got, want := state.Compact(), "sandbox: off (podman) · network: open"; got != want {
 		t.Fatalf("Compact() = %q, want %q", got, want)
+	}
+}
+
+func TestSandboxUnavailableNotice(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		cfg    Config
+		expect string
+	}{
+		{
+			name:   "scripted run that lost its fence says so",
+			cfg:    Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Probe: "sandbox probe path remained readable"}},
+			expect: "sandbox unavailable, continuing without one: sandbox probe path remained readable",
+		},
+		{
+			name:   "a trusted container is still a run without a fence",
+			cfg:    Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Container: "podman"}},
+			expect: "sandbox off, trusting the podman container instead",
+		},
+		{
+			name: "scripted run with a working fence says nothing",
+			cfg:  Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxAuto, Backend: "landlock"}},
+		},
+		{
+			name: "off was asked for, so it is not news",
+			cfg:  Config{PrintMode: true, SandboxPolicy: sandboxOff, Security: SecurityState{EffectivePolicy: sandboxOff}},
+		},
+		{
+			name: "interactive already shows it in the startup line",
+			cfg:  Config{PrintMode: false, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Probe: "sandbox probe path remained readable"}},
+		},
+		{
+			name:   "a probe with no detail still reports the fallback",
+			cfg:    Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff}},
+			expect: "sandbox unavailable, continuing without one",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sandboxUnavailableNotice(tt.cfg)
+			if got != tt.expect {
+				t.Fatalf("sandboxUnavailableNotice() = %q, want %q", got, tt.expect)
+			}
+		})
+	}
+}
+
+// on is handled before this notice and fails the run outright, so the two paths
+// must not both fire for the same condition.
+func TestSandboxUnavailableNoticeStaysQuietForOn(t *testing.T) {
+	cfg := Config{PrintMode: true, SandboxPolicy: sandboxOn, Security: SecurityState{EffectivePolicy: sandboxOn, Probe: "probe failed"}}
+	if got := sandboxUnavailableNotice(cfg); got != "" {
+		t.Fatalf("sandboxUnavailableNotice() = %q, want silence", got)
+	}
+}
+
+func TestSandboxUnavailableNoticeNamesTheCause(t *testing.T) {
+	cfg := Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Probe: "probe setup failed: permission denied"}}
+	if got := sandboxUnavailableNotice(cfg); !strings.Contains(got, "permission denied") {
+		t.Fatalf("notice = %q, want it to carry the probe's reason", got)
 	}
 }
 
