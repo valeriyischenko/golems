@@ -16,6 +16,7 @@ type PendingTool struct {
 
 type State struct {
 	Header          SessionStarted
+	Configured      *SessionConfigured
 	Title           string
 	HasUserTurn     bool
 	Model           string
@@ -80,6 +81,19 @@ func applyRecord(state *State, record Record) error {
 		state.Header = payload
 		state.Model = payload.Model
 		state.ReasoningEffort = payload.ReasoningEffort
+	case RecordSessionConfigured:
+		payload, err := DecodePayload[SessionConfigured](record)
+		if err != nil {
+			return decodeError(record, err)
+		}
+		// The engine substitutes its default when none is configured, so an
+		// empty prompt here is a damaged record rather than a session that ran
+		// without one.
+		if strings.TrimSpace(payload.SystemPrompt) == "" {
+			return fmt.Errorf("session configuration at sequence %d has no system prompt", record.Seq)
+		}
+		copy := payload
+		state.Configured = &copy
 	case RecordModelChanged:
 		payload, err := DecodePayload[ModelChanged](record)
 		if err != nil {
@@ -201,6 +215,12 @@ func cloneState(state State) State {
 	cloned.Messages = llm.CloneMessages(state.Messages)
 	cloned.MessageSeqs = append([]uint64(nil), state.MessageSeqs...)
 	cloned.MessageRunIDs = append([]string(nil), state.MessageRunIDs...)
+	if state.Configured != nil {
+		configured := *state.Configured
+		configured.InstructionPrompts = append([]string(nil), state.Configured.InstructionPrompts...)
+		configured.Tools = append([]llm.Tool(nil), state.Configured.Tools...)
+		cloned.Configured = &configured
+	}
 	if state.Compaction != nil {
 		compaction := *state.Compaction
 		cloned.Compaction = &compaction

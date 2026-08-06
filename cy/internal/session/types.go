@@ -11,6 +11,7 @@ type RecordType string
 
 const (
 	RecordSessionStarted      RecordType = "session_started"
+	RecordSessionConfigured   RecordType = "session_configured"
 	RecordModelChanged        RecordType = "model_changed"
 	RecordUserMessage         RecordType = "user_message"
 	RecordAssistantMessage    RecordType = "assistant_message"
@@ -35,6 +36,51 @@ type SessionStarted struct {
 	Workspace       string `json:"workspace"`
 	Model           string `json:"model"`
 	ReasoningEffort string `json:"reasoning_effort"`
+}
+
+// SandboxState is the fence the session's tools run behind, as it was decided
+// rather than as it was asked for. Policy is the request; Effective is what the
+// request resolved to; Backend names the mechanism that is actually in place and
+// is empty when there is none. Probe says why there is none, where a fence was
+// wanted and did not happen, and Container names the outer isolation Cy decided
+// to trust instead of an inner one.
+//
+// All five, because "auto" can silently mean "no fence" and the four other
+// fields are the difference between a run that was isolated and a run that only
+// asked to be.
+type SandboxState struct {
+	Policy    string `json:"policy,omitempty"`
+	Effective string `json:"effective_policy,omitempty"`
+	Backend   string `json:"backend,omitempty"`
+	Probe     string `json:"probe,omitempty"`
+	Container string `json:"container,omitempty"`
+}
+
+// SessionConfigured is what the model is working with: the prompts it was given,
+// the tools it may call, and the fence those tools run behind. It is written
+// when a session starts and again whenever any of the three changes.
+//
+// It is not part of session_started, tempting as that is. The tool catalog
+// changes mid-session when a capability profile is switched, the sandbox
+// changes on /sandbox, and a resume can start the process with a different
+// system prompt than the one the session began under. Written once into the
+// header, all three would be recorded and then quietly go stale.
+//
+// It is recorded at all because otherwise a replay cannot say what the model
+// saw. The conversation shows the tools that were called but not the ones that
+// were offered, and the answers but not the prompt they were given under; a run
+// that went wrong because a tool was absent, or because the fence was not there,
+// reads exactly like one that did not.
+//
+// Unredacted, unlike a boundary event. That masking exists to keep a credential
+// the model never saw out of the file; these are strings the model was handed
+// verbatim, and a journal that disagreed with them would be describing a
+// different run.
+type SessionConfigured struct {
+	SystemPrompt       string       `json:"system_prompt"`
+	InstructionPrompts []string     `json:"instruction_prompts,omitempty"`
+	Tools              []llm.Tool   `json:"tools,omitempty"`
+	Sandbox            SandboxState `json:"sandbox"`
 }
 
 type ModelChanged struct {

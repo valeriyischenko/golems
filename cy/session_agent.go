@@ -412,6 +412,9 @@ func (a *sessionAgent) SwitchSandbox(value string) error {
 	}
 	a.cfg.SandboxPolicy = policy
 	a.cfg.Security = security
+	if a.engine != nil {
+		return a.engine.ReconfigureSandbox(security.Journal(policy))
+	}
 	return nil
 }
 
@@ -523,6 +526,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		ContextWindow:      spec.ContextWindow,
 		ContextEstimated:   spec.Estimated,
 		Tools:              tools,
+		Sandbox:            cfg.Security.Journal(cfg.SandboxPolicy),
 		RequestPolicy: golem.RequestPolicy{
 			MaxRetries:        -1,
 			BaseDelay:         time.Second,

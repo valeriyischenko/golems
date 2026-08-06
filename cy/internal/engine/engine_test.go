@@ -231,6 +231,7 @@ func TestEnginePersistsToolStepAndResumesFromJournal(t *testing.T) {
 	}
 	wantTypes := []session.RecordType{
 		session.RecordSessionStarted,
+		session.RecordSessionConfigured,
 		session.RecordUserMessage,
 		session.RecordAssistantMessage,
 		session.RecordToolResult,
@@ -668,6 +669,107 @@ func (s *scriptedStream) Usage() llm.Usage { return s.usage }
 func (s *scriptedStream) Close() error {
 	s.closed = true
 	return nil
+}
+
+func TestEngineRecordsConfigurationAndEveryChangeToIt(t *testing.T) {
+	home := t.TempDir()
+	s, err := session.Create(session.CreateOptions{Home: home, Workspace: "/workspace", Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTool := func(name string) golem.Tool {
+		return golem.FunctionTool(name, name, jsonschema.Obj().NoAdditionalProperties(), func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+			return golem.ToolResult{Content: "contents"}, nil
+		})
+	}
+	cfg := Config{
+		Model:              &scriptedModel{},
+		Session:            s,
+		SystemPrompt:       "system",
+		InstructionPrompts: []string{"project rules"},
+		Tools:              []golem.Tool{newTool("read")},
+		Sandbox:            session.SandboxState{Policy: "auto", Effective: "off", Probe: "no platform sandbox is available"},
+	}
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := configurations(t, s)
+	if len(first) != 1 {
+		t.Fatalf("session_configured records = %d, want 1", len(first))
+	}
+	if first[0].SystemPrompt != "system" || len(first[0].InstructionPrompts) != 1 || first[0].InstructionPrompts[0] != "project rules" {
+		t.Fatalf("recorded prompts = %#v", first[0])
+	}
+	if len(first[0].Tools) != 1 || first[0].Tools[0].Function.Name != "read" {
+		t.Fatalf("recorded tools = %#v", first[0].Tools)
+	}
+	// The whole point of carrying the sandbox here: "auto" that resolved to no
+	// fence has to be legible afterwards, and the probe is why.
+	if first[0].Sandbox.Effective != "off" || first[0].Sandbox.Backend != "" || first[0].Sandbox.Probe == "" {
+		t.Fatalf("recorded sandbox = %#v", first[0].Sandbox)
+	}
+
+	// A resume that changes nothing should say nothing. Otherwise reopening a
+	// session ten times leaves ten identical copies of the catalog behind.
+	if _, err := New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if again := configurations(t, s); len(again) != 1 {
+		t.Fatalf("session_configured records after an unchanged rebuild = %d, want 1", len(again))
+	}
+
+	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ReconfigureSandbox(session.SandboxState{Policy: "on", Effective: "on", Backend: "seatbelt"}); err != nil {
+		t.Fatal(err)
+	}
+	recorded := configurations(t, s)
+	if len(recorded) != 3 {
+		t.Fatalf("session_configured records after two changes = %d, want 3", len(recorded))
+	}
+	if len(recorded[1].Tools) != 2 || recorded[1].Sandbox.Backend != "" {
+		t.Fatalf("catalog change recorded as %#v", recorded[1])
+	}
+	if recorded[2].Sandbox.Backend != "seatbelt" || len(recorded[2].Tools) != 2 {
+		t.Fatalf("sandbox change recorded as %#v", recorded[2])
+	}
+
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Configured == nil || state.Configured.Sandbox.Backend != "seatbelt" {
+		t.Fatalf("replayed configuration = %#v, want the last one recorded", state.Configured)
+	}
+	if len(state.Messages) != 0 {
+		t.Fatalf("configuration records became messages: %#v", state.Messages)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func configurations(t *testing.T, s *session.Session) []session.SessionConfigured {
+	t.Helper()
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []session.SessionConfigured
+	for _, record := range records {
+		if record.Type != session.RecordSessionConfigured {
+			continue
+		}
+		payload, err := session.DecodePayload[session.SessionConfigured](record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found = append(found, payload)
+	}
+	return found
 }
 
 func TestEngineJournalsBoundaryEventsItDelivers(t *testing.T) {

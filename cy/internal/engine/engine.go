@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,6 +32,7 @@ type Config struct {
 	ContextWindow      int
 	ContextEstimated   bool
 	Tools              []golem.Tool
+	Sandbox            session.SandboxState
 	RequestPolicy      golem.RequestPolicy
 	BoundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	Sanitize           func(string) string
@@ -58,6 +61,7 @@ type Engine struct {
 	instructionPrompts []string
 	tools              []llm.Tool
 	toolSet            *golem.ToolSet
+	sandbox            session.SandboxState
 	requestPolicy      golem.RequestPolicy
 	boundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	sanitize           func(string) string
@@ -95,6 +99,7 @@ func New(cfg Config) (*Engine, error) {
 		systemPrompt:     systemPrompt,
 		tools:            toolSet.Definitions(),
 		toolSet:          toolSet,
+		sandbox:          cfg.Sandbox,
 		requestPolicy:    cfg.RequestPolicy,
 		boundaryEvents:   cfg.BoundaryEvents,
 		sanitize:         sanitize,
@@ -110,7 +115,56 @@ func New(cfg Config) (*Engine, error) {
 			engine.instructionPrompts = append(engine.instructionPrompts, prompt)
 		}
 	}
+	if err := engine.recordConfiguration(); err != nil {
+		return nil, fmt.Errorf("cy engine: record session configuration: %w", err)
+	}
 	return engine, nil
+}
+
+// recordConfiguration writes what the model is working with to the journal,
+// unless the journal already says exactly that.
+//
+// Skipping the identical write is what makes this cheap enough to call from
+// every place that can change the configuration, including construction: a
+// resume that changes nothing adds nothing, and what ends up in the file is the
+// list of changes that actually happened. The caller holds turnMu, or is New and
+// has not published the engine yet.
+func (e *Engine) recordConfiguration() error {
+	configured := session.SessionConfigured{
+		SystemPrompt:       e.systemPrompt,
+		InstructionPrompts: e.instructionPrompts,
+		Tools:              e.tools,
+		Sandbox:            e.sandbox,
+	}
+	state, err := e.session.Replay()
+	if err != nil {
+		return err
+	}
+	unchanged, err := sameConfiguration(state.Configured, configured)
+	if err != nil || unchanged {
+		return err
+	}
+	_, err = e.session.Append(session.RecordSessionConfigured, configured)
+	return err
+}
+
+// sameConfiguration compares through the encoding both sides are recorded in,
+// rather than field by field. The recorded value has been through a decode and
+// the live one has not, so a structural comparison would have to know which of
+// the differences that introduces are meaningless.
+func sameConfiguration(recorded *session.SessionConfigured, current session.SessionConfigured) (bool, error) {
+	if recorded == nil {
+		return false, nil
+	}
+	was, err := json.Marshal(recorded)
+	if err != nil {
+		return false, err
+	}
+	now, err := json.Marshal(current)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(was, now), nil
 }
 
 func (e *Engine) ReconfigureModel(model golem.Model, modelURI string, contextWindow int, contextEstimated bool) error {
@@ -141,7 +195,17 @@ func (e *Engine) ReconfigureTools(tools []golem.Tool) error {
 	defer e.turnMu.Unlock()
 	e.tools = toolSet.Definitions()
 	e.toolSet = toolSet
-	return nil
+	return e.recordConfiguration()
+}
+
+// ReconfigureSandbox records a change to the fence the tools run behind. The
+// engine makes no use of the value: it holds it because the journal has to say
+// what a tool call could reach, and the engine is what writes the journal.
+func (e *Engine) ReconfigureSandbox(sandbox session.SandboxState) error {
+	e.turnMu.Lock()
+	defer e.turnMu.Unlock()
+	e.sandbox = sandbox
+	return e.recordConfiguration()
 }
 
 // QueueInput keeps text entered during a turn in memory. It is injected before

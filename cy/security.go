@@ -158,6 +158,21 @@ func unavailableSandbox(state SecurityState, probe string) SecurityState {
 
 func (s SecurityState) Active() bool { return s.Backend != "" }
 
+// Journal converts what Cy decided about isolation into the shape the session
+// records it in, carrying the requested policy alongside because SecurityState
+// holds only the outcome. The two types stay separate: this one is a decision
+// with probe machinery behind it, and the record is what a reader of the file
+// needs to know afterwards.
+func (s SecurityState) Journal(requested string) session.SandboxState {
+	return session.SandboxState{
+		Policy:    requested,
+		Effective: s.EffectivePolicy,
+		Backend:   s.Backend,
+		Probe:     s.Probe,
+		Container: s.Container,
+	}
+}
+
 // requireEffectiveSandbox decides whether a run that did not get a sandbox may
 // proceed. It may when it asked for none; when the platform has none to give,
 // since a build with no backend at all would otherwise refuse to start under
