@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -528,21 +529,42 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		Tools:              tools,
 		Sandbox:            cfg.Security.Journal(cfg.SandboxPolicy),
 		MaxToolIterations:  cfg.MaxToolIterations,
-		RequestPolicy: golem.RequestPolicy{
-			MaxRetries:        -1,
-			BaseDelay:         time.Second,
-			RetryBudget:       15 * time.Minute,
-			MaxDelay:          time.Minute,
-			StreamIdleTimeout: 5 * time.Minute,
-		},
-		BoundaryEvents: boundaryEventsFrom(processes),
-		Sanitize:       a.masker.Redact,
+		RequestPolicy:      requestPolicyFor(cfg),
+		BoundaryEvents:     boundaryEventsFrom(processes),
+		Sanitize:           a.masker.Redact,
 	})
 	if err != nil {
 		_ = processes.Close()
 		return nil, nil, fmt.Errorf("initialize engine: %w", err)
 	}
 	return eng, processes, nil
+}
+
+// Defaults for the retry policy of one logical model request. Retries are
+// unlimited in number and bounded in time instead, which is why the budget has
+// to stay positive: golem refuses unlimited retries without one.
+const (
+	defaultRetryBudget       = 15 * time.Minute
+	defaultStreamIdleTimeout = 5 * time.Minute
+)
+
+// requestPolicyFor bounds one model request. Only the two durations that decide
+// how long a broken endpoint costs are configurable; the rest is the shape of
+// the backoff rather than its limit.
+//
+// Both are needed for either to mean anything. The budget is checked between
+// attempts, so it bounds a flapping endpoint but not a single hung one: an
+// attempt that has connected and gone quiet is bounded only by the idle
+// timeout. A retry budget on its own would be a limit that a stalled stream
+// walks straight past.
+func requestPolicyFor(cfg Config) golem.RequestPolicy {
+	return golem.RequestPolicy{
+		MaxRetries:        -1,
+		BaseDelay:         time.Second,
+		MaxDelay:          time.Minute,
+		RetryBudget:       cmp.Or(cfg.RetryBudget, defaultRetryBudget),
+		StreamIdleTimeout: cmp.Or(cfg.StreamIdleTimeout, defaultStreamIdleTimeout),
+	}
 }
 
 // boundaryEventsFrom adapts the process manager's completions to what the

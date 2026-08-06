@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/levmv/golems/cy/internal/session"
 	toolruntime "github.com/levmv/golems/cy/internal/tools"
@@ -117,6 +118,49 @@ func TestNormalizeMaxToolIterations(t *testing.T) {
 		if _, err := normalizeMaxToolIterations(input); err == nil {
 			t.Fatalf("normalizeMaxToolIterations(%q) accepted a value that is not a positive cycle count or unlimited", input)
 		}
+	}
+}
+
+func TestNormalizePositiveDuration(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  time.Duration
+	}{
+		{input: "", want: 0},
+		{input: " 90s ", want: 90 * time.Second},
+		{input: "2m30s", want: 2*time.Minute + 30*time.Second},
+	} {
+		got, err := normalizePositiveDuration(test.input, "retry budget")
+		if err != nil || got != test.want {
+			t.Fatalf("normalizePositiveDuration(%q) = %v, %v; want %v", test.input, got, err, test.want)
+		}
+	}
+	// Zero is rejected rather than read as "no limit": Cy asks for unlimited
+	// retries, so golem refuses a policy with no budget outright.
+	for _, input := range []string{"soon", "0", "0s", "-30s", "90"} {
+		if _, err := normalizePositiveDuration(input, "retry budget"); err == nil {
+			t.Fatalf("normalizePositiveDuration(%q) accepted a value that is not a positive duration", input)
+		}
+	}
+}
+
+func TestRequestPolicyUsesConfiguredBoundsAndStaysValid(t *testing.T) {
+	policy := requestPolicyFor(Config{})
+	if policy.RetryBudget != defaultRetryBudget || policy.StreamIdleTimeout != defaultStreamIdleTimeout {
+		t.Fatalf("unset config = %+v, want the defaults", policy)
+	}
+	policy = requestPolicyFor(Config{RetryBudget: 90 * time.Second, StreamIdleTimeout: 20 * time.Second})
+	if policy.RetryBudget != 90*time.Second || policy.StreamIdleTimeout != 20*time.Second {
+		t.Fatalf("configured policy = %+v", policy)
+	}
+	// Cy keeps retries unlimited in number, so golem requires the budget and the
+	// base delay to stay positive. A configured policy that failed this check
+	// would surface as a failure to start a session, not as a bad flag.
+	if policy.MaxRetries >= 0 {
+		t.Fatalf("MaxRetries = %d, want unlimited", policy.MaxRetries)
+	}
+	if _, err := golem.NewRequester(golem.RequesterConfig{Model: &runTurnFakeModel{}, Policy: policy}); err != nil {
+		t.Fatalf("configured policy rejected by golem: %v", err)
 	}
 }
 

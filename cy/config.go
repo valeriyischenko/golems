@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,6 +23,8 @@ type Config struct {
 	BaseURL           string
 	ContextWindow     int
 	MaxToolIterations int
+	RetryBudget       time.Duration
+	StreamIdleTimeout time.Duration
 	SystemPrompt      string
 	RootDir           string
 	Home              string
@@ -85,6 +88,26 @@ func normalizeMaxToolIterations(value string) (int, error) {
 		return 0, fmt.Errorf("invalid tool iteration limit %q; expected a positive number of model-to-tool cycles, or unlimited", value)
 	}
 	return iterations, nil
+}
+
+// normalizePositiveDuration reads one of the durations that bound a model
+// request. Zero means the caller did not say and the default stands.
+//
+// Neither of them accepts "unlimited", unlike the tool fuse. Cy asks for
+// unlimited retries and lets time be the limit, so a budget of zero is not a
+// generous setting but an invalid one -- golem refuses the combination outright.
+// The idle timeout is the only thing bounding an attempt that has connected and
+// gone quiet, which is the failure an unattended run most needs to survive.
+func normalizePositiveDuration(value, setting string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("invalid %s %q; expected a positive duration such as 90s or 5m", setting, value)
+	}
+	return duration, nil
 }
 
 func normalizeTerminalTheme(value string) (string, error) {

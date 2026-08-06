@@ -39,6 +39,8 @@ func runMain() (returnErr error) {
 	baseURL := flag.String("base-url", cfg.BaseURL, "override the provider endpoint, for a self-hosted or proxied deployment")
 	contextWindow := flag.String("context-window", os.Getenv("CY_CONTEXT_WINDOW"), "context window in tokens, for a model Cy has no entry for")
 	maxToolIterations := flag.String("max-tool-iterations", os.Getenv("CY_MAX_TOOL_ITERATIONS"), "per-turn cap on model-to-tool cycles, or unlimited")
+	retryBudget := flag.String("retry-budget", os.Getenv("CY_RETRY_BUDGET"), "how long one model request may keep retrying, e.g. 90s")
+	streamIdleTimeout := flag.String("stream-idle-timeout", os.Getenv("CY_STREAM_IDLE_TIMEOUT"), "how long a model stream may produce nothing before the attempt is abandoned")
 	systemPrompt := flag.String("system-prompt", cfg.SystemPrompt, "replace the built-in system prompt")
 	rootDir := flag.String("root", cfg.RootDir, "workspace root for file and search tools")
 	home := flag.String("home", cfg.Home, "Cy home directory (defaults to CY_HOME or ~/.cy)")
@@ -75,6 +77,14 @@ func runMain() (returnErr error) {
 	}
 	cfg.ContextWindow = window
 	cfg.MaxToolIterations, err = normalizeMaxToolIterations(*maxToolIterations)
+	if err != nil {
+		return asConfigError(err)
+	}
+	cfg.RetryBudget, err = normalizePositiveDuration(*retryBudget, "retry budget")
+	if err != nil {
+		return asConfigError(err)
+	}
+	cfg.StreamIdleTimeout, err = normalizePositiveDuration(*streamIdleTimeout, "stream idle timeout")
 	if err != nil {
 		return asConfigError(err)
 	}
