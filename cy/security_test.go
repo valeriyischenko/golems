@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -165,6 +167,84 @@ func TestSandboxUnavailableNoticeNamesTheCause(t *testing.T) {
 	cfg := Config{PrintMode: true, SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Probe: "probe setup failed: permission denied"}}
 	if got := sandboxUnavailableNotice(cfg); !strings.Contains(got, "permission denied") {
 		t.Fatalf("notice = %q, want it to carry the probe's reason", got)
+	}
+}
+
+func TestGrantedDirContainingPicksTheInnermost(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		path    string
+		granted []string
+		want    string
+	}{
+		{
+			name:    "the workspace is the usual culprit",
+			path:    "/work/repo/.cy",
+			granted: []string{"/work/repo", "/usr"},
+			want:    "/work/repo",
+		},
+		{
+			name:    "the innermost grant wins over an outer one",
+			path:    "/work/repo/state/.cy",
+			granted: []string{"/work", "/work/repo", "/work/repo/state"},
+			want:    "/work/repo/state",
+		},
+		{
+			name:    "a path outside every grant has no cause to name",
+			path:    "/home/user/.cy",
+			granted: []string{"/work/repo", "/usr"},
+		},
+		{
+			name:    "a sibling with a shared prefix is not inside",
+			path:    "/work/repository/.cy",
+			granted: []string{"/work/repo"},
+		},
+		{
+			name:    "the grant itself counts as containing",
+			path:    "/work/repo",
+			granted: []string{"/work/repo"},
+			want:    "/work/repo",
+		},
+		{
+			name:    "nothing is granted where there is no sandbox",
+			path:    "/work/repo/.cy",
+			granted: nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := grantedDirContaining(tt.path, tt.granted); got != tt.want {
+				t.Fatalf("grantedDirContaining(%q, %v) = %q, want %q", tt.path, tt.granted, got, tt.want)
+			}
+		})
+	}
+}
+
+// The workspace is granted, so a home inside it is the one case the message
+// has to name: it is both the most common way to get here and the only one the
+// reader can fix from the command line.
+func TestProbeReadableReasonNamesTheGrantedDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".cy")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reason := probeReadableReason(home, workspace, filepath.Join(home, "tool-cache"))
+	for _, want := range []string{"sandbox probe path remained readable", canonicalPath(workspace), "--home"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want it to mention %q", reason, want)
+		}
+	}
+}
+
+// A home outside every grant means the probe failed for some other reason, and
+// guessing at one would send the reader after the wrong thing. Report the
+// symptom alone.
+func TestProbeReadableReasonKeepsTheSymptomWhenTheCauseIsElsewhere(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	reason := probeReadableReason(home, workspace, filepath.Join(home, "tool-cache"))
+	if reason != "sandbox probe path remained readable" {
+		t.Fatalf("reason = %q, want the symptom alone", reason)
 	}
 }
 

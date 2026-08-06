@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -99,9 +100,52 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 42 {
-		return unavailableSandbox(state, "sandbox probe path remained readable")
+		return unavailableSandbox(state, probeReadableReason(probeDir, root, toolHome))
 	}
 	return unavailableSandbox(state, "sandbox probe failed: "+err.Error())
+}
+
+// probeReadableReason explains a probe that came back readable. The bare fact
+// is a symptom; the cause is almost always that Cy's home sits inside a
+// directory tool processes are granted, most often the workspace itself. Say
+// which directory it is and how to move out of it, because the reader has to
+// act on this and the symptom alone does not tell them how.
+func probeReadableReason(probeDir, workspace, toolHome string) string {
+	reason := "sandbox probe path remained readable"
+	granted := grantedDirContaining(probeDir, toolruntime.SandboxGrantedDirs(workspace, toolHome))
+	if granted == "" {
+		return reason
+	}
+	return fmt.Sprintf("%s: Cy's home %s is inside %s, which tool processes may read (move it with --home or CY_HOME)", reason, probeDir, granted)
+}
+
+// grantedDirContaining returns the innermost directory in granted that holds
+// path, or "" when none does. Paths are compared after resolving symlinks,
+// since /tmp and /var are symlinks into /private on macOS and a comparison on
+// the unresolved strings would miss every one of them.
+func grantedDirContaining(path string, granted []string) string {
+	path = canonicalPath(path)
+	innermost := ""
+	for _, dir := range granted {
+		if dir == "" {
+			continue
+		}
+		dir = canonicalPath(dir)
+		if path != dir && !strings.HasPrefix(path, dir+string(os.PathSeparator)) {
+			continue
+		}
+		if len(dir) > len(innermost) {
+			innermost = dir
+		}
+	}
+	return innermost
+}
+
+func canonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(path)
 }
 
 func unavailableSandbox(state SecurityState, probe string) SecurityState {

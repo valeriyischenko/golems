@@ -186,6 +186,11 @@ left there by anyone else are not reachable from inside. Explicit `!` commands
 always run outside the model sandbox with the ambient environment and may
 expose their output to the model through the saved session context.
 
+`$CY_HOME` must not be inside the workspace. The workspace is granted to tool
+processes, so a home beneath it puts credentials and session journals inside
+the fence. The startup probe detects this and names the granted directory
+responsible; `--home` or `CY_HOME` is how to move out of it.
+
 The intended boundary is filesystem access. Network remains open, and Cy does
 not parse commands or mediate their semantic effects. The interactive startup
 line reports the effective backend and network state. A non-interactive run has
