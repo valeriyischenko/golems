@@ -26,6 +26,8 @@ const (
 	defaultCommandPreview  = 32 * 1024
 	defaultCommandLogLimit = 256 * 1024
 	maxJobReadBytes        = 256 * 1024
+	jobStopTimeout         = 3 * time.Second
+	jobKillRetryInterval   = 20 * time.Millisecond
 )
 
 const (
@@ -360,8 +362,10 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 			timer.Stop()
 		case <-timer.C:
 			timedOut = true
-			_ = killProcessGroup(job.cmd)
+			stopped := make(chan struct{})
+			go keepKillingProcessGroup(job.cmd, stopped)
 			waitErr = <-wait
+			close(stopped)
 		}
 	} else {
 		waitErr = <-wait
@@ -445,14 +449,45 @@ func (m *processManager) stop(ctx context.Context, id, reason string) (*processJ
 	}
 	job.stopReason = reason
 	job.mu.Unlock()
-	_ = killProcessGroup(job.cmd)
+	stopped := make(chan struct{})
+	defer close(stopped)
+	go keepKillingProcessGroup(job.cmd, stopped)
 	select {
 	case <-job.done:
 		return job, nil
 	case <-ctx.Done():
 		return job, ctx.Err()
-	case <-time.After(3 * time.Second):
+	case <-time.After(jobStopTimeout):
 		return job, errors.New("timed out waiting for job to stop")
+	}
+}
+
+// keepKillingProcessGroup signals the group until the caller closes stop.
+//
+// One signal is not enough. The kernel walks the process group to deliver it,
+// and a child forked while that walk is in progress joins the group without
+// being signalled, so a command that is mid-fork when we kill it can leave a
+// survivor behind. The survivor holds the write end of the pipe the job's
+// output is read through, which means the job does not merely leak a process:
+// Wait blocks in its output copier long after the leader has been reaped, and
+// the stop reports a timeout for a process group that is still alive.
+//
+// Signalling again is safe. A process group id stays reserved for as long as
+// the group has a member, so while there is anything left to kill the id cannot
+// have been recycled onto some unrelated group.
+func keepKillingProcessGroup(command *exec.Cmd, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		_ = killProcessGroup(command)
+		select {
+		case <-stop:
+			return
+		case <-time.After(jobKillRetryInterval):
+		}
 	}
 }
 
