@@ -39,6 +39,13 @@ func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 // sandboxReadOnlyDirs holds the system directories named as read-only subpaths
 // in the profile below. The two lists have to agree, and a test checks that
 // they do.
+//
+// They are whole trees because that is what an interpreter finding its standard
+// library or a tool finding its support files needs, and granting them exposes
+// nothing the invoking user could not already read: Seatbelt rules subtract
+// from Unix permissions and never add to them. They are still coarser than the
+// need. /Library is the clearest case — see the Security section of the README
+// for what a narrowing deny block would look like.
 var sandboxReadOnlyDirs = []string{"/Applications", "/Library", "/System", "/bin", "/dev", "/etc", "/nix", "/opt", "/private/etc", "/private/var/db/dyld", "/private/var/db/timezone", "/private/var/select", "/sbin", "/usr"}
 
 // sandboxWritableDirs holds everything a tool process may write. The

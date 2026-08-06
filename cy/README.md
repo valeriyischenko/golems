@@ -197,6 +197,19 @@ processes, so a home beneath it puts credentials and session journals inside
 the fence. The startup probe detects this and names the granted directory
 responsible; `--home` or `CY_HOME` is how to move out of it.
 
+The read-only grants are wide. A tool process can read the system tree —
+`/usr`, `/bin`, `/etc` and the rest, plus `/Applications`, `/Library` and
+`/System` on macOS — because that is what it takes for an interpreter to find
+its standard library or for `git` to find its templates. This exposes nothing
+the invoking user could not already read: both backends subtract from Unix
+permissions and never add to them. But subtracting is the point, and the grants
+are coarser than the need. `/Library` is the clearest case: it is machine-wide
+state, and `/Library/Keychains/System.keychain` is world-readable, so a tool
+process can read it today. It is the system `/Library` and not `~/Library` —
+the real home is never granted, so per-user data there is already out of reach.
+Narrowing the system one is a `deny file-read*` block placed after the allows,
+since SBPL is last-match-wins; that has not been done yet.
+
 The intended boundary is filesystem access. Network remains open, and Cy does
 not parse commands or mediate their semantic effects. The interactive startup
 line reports the effective backend and network state. A non-interactive run has
