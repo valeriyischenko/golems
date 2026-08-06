@@ -84,10 +84,27 @@ func systemBashPath() string {
 	return ""
 }
 
+// sandboxReadOnlyDirs holds the system directories a tool process may read.
+var sandboxReadOnlyDirs = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/nix", "/opt", "/snap", "/run/systemd/resolve"}
+
+// sandboxWritableDirs holds everything a tool process may write. The
+// machine-wide temp directories are deliberately absent: they are shared with
+// every other process on the box, so granting them means anything a tool
+// leaves in TMPDIR is readable by anyone, and anything another user leaves
+// there is reachable by the tool. Tools get their own temp inside the home
+// instead, and minimalToolEnv points TMPDIR at it.
+func sandboxWritableDirs(workspace, home string) []string {
+	return []string{workspace, home}
+}
+
+func sandboxGrantedDirs(workspace, home string) []string {
+	return append(sandboxWritableDirs(workspace, home), sandboxReadOnlyDirs...)
+}
+
 func applyToolLandlock(workspace, home, policy string) error {
 	rules := []landlock.Rule{
-		landlock.RODirs("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/nix", "/opt", "/snap", "/run/systemd/resolve").IgnoreIfMissing(),
-		landlock.RWDirs("/tmp", "/var/tmp", workspace, home).IgnoreIfMissing(),
+		landlock.RODirs(sandboxReadOnlyDirs...).IgnoreIfMissing(),
+		landlock.RWDirs(sandboxWritableDirs(workspace, home)...).IgnoreIfMissing(),
 		landlock.RWFiles("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty").IgnoreIfMissing(),
 	}
 	if policy == sandboxOn {

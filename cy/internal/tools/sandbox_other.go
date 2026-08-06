@@ -19,4 +19,8 @@ func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 	return ambientBashCommand(command, workdir), nil
 }
 
+// Nothing is fenced here, so no directory is granted in the sense the other
+// platforms mean it: there is no boundary for a path to be inside of.
+func sandboxGrantedDirs(workspace, home string) []string { return nil }
+
 func hardenSupervisor() {}

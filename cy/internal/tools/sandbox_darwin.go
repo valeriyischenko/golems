@@ -25,17 +25,34 @@ func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 		}
 		return ambientBashCommand(command, workdir), nil
 	}
-	temporary := canonicalSandboxPath(os.TempDir())
 	cmd := exec.Command(sandboxExecPath,
 		"-D", "WORKSPACE="+canonicalSandboxPath(workspace),
 		"-D", "TOOL_HOME="+canonicalSandboxPath(home),
-		"-D", "TEMP_DIR="+temporary,
 		"-p", seatbeltProfile,
 		"/bin/bash", "-lc", command,
 	)
 	cmd.Dir = workdir
 	cmd.Env = minimalToolEnv(home)
 	return cmd, nil
+}
+
+// sandboxReadOnlyDirs holds the system directories named as read-only subpaths
+// in the profile below. The two lists have to agree, and a test checks that
+// they do.
+var sandboxReadOnlyDirs = []string{"/Applications", "/Library", "/System", "/bin", "/dev", "/etc", "/nix", "/opt", "/private/etc", "/private/var/db/dyld", "/private/var/db/timezone", "/private/var/select", "/sbin", "/usr"}
+
+// sandboxWritableDirs holds everything a tool process may write. The
+// machine-wide temp directories are deliberately absent: they are shared with
+// every other process on the box, so granting them means anything a tool
+// leaves in TMPDIR is readable by anyone, and anything another user leaves
+// there is reachable by the tool. Tools get their own temp inside the home
+// instead, and minimalToolEnv points TMPDIR at it.
+func sandboxWritableDirs(workspace, home string) []string {
+	return []string{canonicalSandboxPath(workspace), canonicalSandboxPath(home)}
+}
+
+func sandboxGrantedDirs(workspace, home string) []string {
+	return append(sandboxWritableDirs(workspace, home), sandboxReadOnlyDirs...)
 }
 
 func canonicalSandboxPath(path string) string {
@@ -63,7 +80,6 @@ const seatbeltProfile = `(version 1)
   (literal "/")
   (subpath (param "WORKSPACE"))
   (subpath (param "TOOL_HOME"))
-  (subpath (param "TEMP_DIR"))
   (subpath "/Applications")
   (subpath "/Library")
   (subpath "/System")
@@ -73,11 +89,9 @@ const seatbeltProfile = `(version 1)
   (subpath "/nix")
   (subpath "/opt")
   (subpath "/private/etc")
-  (subpath "/private/tmp")
   (subpath "/private/var/db/dyld")
   (subpath "/private/var/db/timezone")
   (subpath "/private/var/select")
-  (subpath "/private/var/tmp")
   (subpath "/sbin")
   (subpath "/usr"))
 (allow file-read-metadata)
@@ -85,9 +99,6 @@ const seatbeltProfile = `(version 1)
 (allow file-write*
   (subpath (param "WORKSPACE"))
   (subpath (param "TOOL_HOME"))
-  (subpath (param "TEMP_DIR"))
-  (subpath "/private/tmp")
-  (subpath "/private/var/tmp")
   (subpath "/dev/fd")
   (literal "/dev/null")
   (literal "/dev/ptmx")

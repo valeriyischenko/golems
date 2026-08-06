@@ -116,6 +116,9 @@ func NewProcessManager(root, home, sandbox string, allowBackground bool) (*Proce
 	if err := os.Chmod(toolHome, 0o700); err != nil {
 		return nil, fmt.Errorf("set tool home mode: %w", err)
 	}
+	if err := os.MkdirAll(WorkspaceToolTemp(toolHome), 0o700); err != nil {
+		return nil, fmt.Errorf("create tool temp: %w", err)
+	}
 	return &processManager{
 		workspace:       workspace,
 		toolHome:        toolHome,

@@ -582,8 +582,12 @@ func minimalToolEnv(home string) []string {
 	// per-workspace tool home, while this small allowlist keeps ordinary CLI
 	// tools usable without leaking provider keys or other credential carriers.
 	// This reduces accidental exposure; it is not a sandbox boundary.
-	env := []string{"HOME=" + home}
-	for _, key := range []string{"PATH", "LANG", "LC_ALL", "TZ", "TMPDIR"} {
+	//
+	// TMPDIR is set rather than inherited: pointing it inside the tool home is
+	// what lets the sandbox stop granting the machine-wide temp directory,
+	// which every other process on the box can also read and write.
+	env := []string{"HOME=" + home, "TMPDIR=" + WorkspaceToolTemp(home)}
+	for _, key := range []string{"PATH", "LANG", "LC_ALL", "TZ"} {
 		if value, ok := os.LookupEnv(key); ok {
 			env = append(env, key+"="+value)
 		}

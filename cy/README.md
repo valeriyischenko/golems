@@ -179,9 +179,12 @@ Use `/sandbox` to change and remember the policy during an interactive session.
 When the effective policy is `off`, model-requested Bash inherits the ambient
 environment, real `HOME`, and user permissions. Sandboxed processes instead
 receive a separate tool home and a minimal environment without provider
-credentials. Explicit `!` commands always run outside the model sandbox with
-the ambient environment and may expose their output to the model through the
-saved session context.
+credentials. `TMPDIR` points inside that tool home rather than at the shared
+machine temp directory, which is neither granted nor reachable: scratch files
+are not left where every other process on the host can read them, and files
+left there by anyone else are not reachable from inside. Explicit `!` commands
+always run outside the model sandbox with the ambient environment and may
+expose their output to the model through the saved session context.
 
 The intended boundary is filesystem access. Network remains open, and Cy does
 not parse commands or mediate their semantic effects. The interactive startup
