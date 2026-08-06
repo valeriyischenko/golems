@@ -96,6 +96,30 @@ func TestNormalizeContextWindow(t *testing.T) {
 	}
 }
 
+func TestNormalizeMaxToolIterations(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  int
+	}{
+		{input: "", want: 0},
+		{input: " 40 ", want: 40},
+		{input: "unlimited", want: -1},
+		{input: " UNLIMITED ", want: -1},
+	} {
+		got, err := normalizeMaxToolIterations(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizeMaxToolIterations(%q) = %d, %v; want %d", test.input, got, err, test.want)
+		}
+	}
+	// -1 is rejected on purpose. Removing the fuse is spelled, so a mistyped
+	// number cannot silently mean no limit at all.
+	for _, input := range []string{"many", "0", "-1", "12 cycles"} {
+		if _, err := normalizeMaxToolIterations(input); err == nil {
+			t.Fatalf("normalizeMaxToolIterations(%q) accepted a value that is not a positive cycle count or unlimited", input)
+		}
+	}
+}
+
 func TestBuildModelWithBaseURLDoesNotRequireProviderCredential(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	cfg := Config{ModelURI: "openai/local-model", BaseURL: "http://127.0.0.1:8011/v1"}

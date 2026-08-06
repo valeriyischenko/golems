@@ -855,3 +855,112 @@ func TestEngineJournalsBoundaryEventsItDelivers(t *testing.T) {
 		t.Fatalf("boundary event missing from replayed messages: %#v", state.Messages)
 	}
 }
+
+func TestEngineToolFuseDefaultsAndAcceptsUnlimited(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured int
+		want       int
+	}{
+		{name: "unset takes the default fuse", configured: 0, want: defaultMaxToolIterationsPerTurn},
+		{name: "a positive value replaces it", configured: 12, want: 12},
+		{name: "a negative value survives as unlimited", configured: -1, want: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			eng, err := New(Config{Model: &scriptedModel{}, Session: s, MaxToolIterations: test.configured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if eng.maxToolIterations != test.want {
+				t.Fatalf("maxToolIterations = %d, want %d", eng.maxToolIterations, test.want)
+			}
+		})
+	}
+}
+
+// The fuse is worth a behavioural test and not only a plumbing one: tripping it
+// is not a failure, it is a forced summary, so a fuse wired to the wrong place
+// would still produce a turn that looks like it worked.
+func TestEngineStopsToolCallsAtTheConfiguredFuse(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var executions int
+	tool := golem.FunctionToolWithEffect(golem.ToolEffectRead, "read", "read", jsonschema.Object(nil), func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+		executions++
+		return golem.ToolResult{Content: "contents"}, nil
+	})
+	engine, err := New(Config{Model: &fuseModel{}, Session: s, Tools: []golem.Tool{tool}, MaxToolIterations: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := engine.Stream(context.Background(), "keep going", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executions != 2 {
+		t.Fatalf("tool executions = %d, want the configured fuse of 2", executions)
+	}
+	// A tripped fuse ends the turn by asking for a summary with tools withheld,
+	// so the turn completes. Only the journal says it was cut off.
+	if turn.Reply != "summary without tools" {
+		t.Fatalf("reply = %q, want the forced summary", turn.Reply)
+	}
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := 0
+	for _, record := range records {
+		if record.Type != session.RecordToolResult {
+			continue
+		}
+		payload, err := session.DecodePayload[session.ToolResult](record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(payload.Content, "tool iteration limit reached after 2 iterations") {
+			limits++
+		}
+	}
+	if limits != 1 {
+		t.Fatalf("journalled tool-limit results = %d, want 1", limits)
+	}
+}
+
+// fuseModel asks for a tool for as long as it is allowed one, so the turn ends
+// only because the fuse blew. The trip path asks for a summary by sending the
+// tools with ToolChoice none rather than by withholding them, so that is what
+// this has to honour.
+type fuseModel struct{ mu sync.Mutex }
+
+func (m *fuseModel) Chat(ctx context.Context, request llm.Request) (*llm.Response, error) {
+	return m.respond(request)
+}
+
+func (m *fuseModel) Stream(ctx context.Context, request llm.Request) (llm.Stream, error) {
+	response, err := m.respond(request)
+	if err != nil {
+		return nil, err
+	}
+	return streamResponse(response), nil
+}
+
+func (m *fuseModel) respond(request llm.Request) (*llm.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if request.ToolChoice != nil && request.ToolChoice.Mode == llm.ToolChoiceNone {
+		return &llm.Response{Content: "summary without tools", FinishReason: llm.FinishReasonStop}, nil
+	}
+	return &llm.Response{
+		ToolCalls:    []llm.ToolCall{{ID: "call", Function: llm.ToolFunction{Name: "read", Arguments: `{}`}}},
+		FinishReason: llm.FinishReasonToolUse,
+	}, nil
+}

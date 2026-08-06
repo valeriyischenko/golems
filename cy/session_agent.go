@@ -527,6 +527,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		ContextEstimated:   spec.Estimated,
 		Tools:              tools,
 		Sandbox:            cfg.Security.Journal(cfg.SandboxPolicy),
+		MaxToolIterations:  cfg.MaxToolIterations,
 		RequestPolicy: golem.RequestPolicy{
 			MaxRetries:        -1,
 			BaseDelay:         time.Second,

@@ -21,6 +21,7 @@ type Config struct {
 	ReasoningEffort   string
 	BaseURL           string
 	ContextWindow     int
+	MaxToolIterations int
 	SystemPrompt      string
 	RootDir           string
 	Home              string
@@ -61,6 +62,29 @@ func normalizeContextWindow(value string) (int, error) {
 		return 0, fmt.Errorf("invalid context window %q; expected a positive number of tokens", value)
 	}
 	return window, nil
+}
+
+// normalizeMaxToolIterations reads the per-turn tool iteration fuse. Zero means
+// the caller did not say and the engine default stands.
+//
+// "unlimited" is spelled out because a bare -1 is not something anyone types by
+// accident and not something anyone reads back with confidence either. Removing
+// the fuse is a real choice for a long unattended run and a way to burn a budget
+// with nobody watching, so it costs a word; every other value must be positive,
+// which keeps a mistyped "-1" an error rather than a silent no-limit.
+func normalizeMaxToolIterations(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	if strings.EqualFold(value, "unlimited") {
+		return -1, nil
+	}
+	iterations, err := strconv.Atoi(value)
+	if err != nil || iterations <= 0 {
+		return 0, fmt.Errorf("invalid tool iteration limit %q; expected a positive number of model-to-tool cycles, or unlimited", value)
+	}
+	return iterations, nil
 }
 
 func normalizeTerminalTheme(value string) (string, error) {

@@ -38,6 +38,7 @@ func runMain() (returnErr error) {
 	modelURI := flag.String("model", cfg.ModelURI, "model URI in provider/model format")
 	baseURL := flag.String("base-url", cfg.BaseURL, "override the provider endpoint, for a self-hosted or proxied deployment")
 	contextWindow := flag.String("context-window", os.Getenv("CY_CONTEXT_WINDOW"), "context window in tokens, for a model Cy has no entry for")
+	maxToolIterations := flag.String("max-tool-iterations", os.Getenv("CY_MAX_TOOL_ITERATIONS"), "per-turn cap on model-to-tool cycles, or unlimited")
 	systemPrompt := flag.String("system-prompt", cfg.SystemPrompt, "replace the built-in system prompt")
 	rootDir := flag.String("root", cfg.RootDir, "workspace root for file and search tools")
 	home := flag.String("home", cfg.Home, "Cy home directory (defaults to CY_HOME or ~/.cy)")
@@ -73,6 +74,10 @@ func runMain() (returnErr error) {
 		return asConfigError(err)
 	}
 	cfg.ContextWindow = window
+	cfg.MaxToolIterations, err = normalizeMaxToolIterations(*maxToolIterations)
+	if err != nil {
+		return asConfigError(err)
+	}
 	normalizedProfile, err := toolruntime.NormalizeCapabilityProfile(*profile)
 	if err != nil {
 		return asConfigError(err)
