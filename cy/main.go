@@ -169,8 +169,8 @@ func runMain() (returnErr error) {
 		}
 	}
 	cfg.Security = buildSecurityState(ctx, cfg, root, store)
-	if cfg.Security.EffectivePolicy == sandboxOn && !cfg.Security.Active() {
-		return asConfigError(fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe))
+	if err := requireEffectiveSandbox(cfg); err != nil {
+		return asConfigError(err)
 	}
 	if notice := sandboxUnavailableNotice(cfg); notice != "" {
 		fmt.Fprintf(os.Stderr, "cy: %s\n", notice)

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	toolruntime "github.com/levmv/golems/cy/internal/tools"
 )
 
 func TestNormalizeSandboxPolicySupportsOnAndLegacyRequire(t *testing.T) {
@@ -109,6 +111,72 @@ func TestSecuritySummaryIncludesAutoContainer(t *testing.T) {
 	if got, want := state.Compact(), "sandbox: off (podman) · network: open"; got != want {
 		t.Fatalf("Compact() = %q, want %q", got, want)
 	}
+}
+
+func TestRequireEffectiveSandbox(t *testing.T) {
+	backend := toolruntime.SandboxBackend()
+	if backend == "" {
+		// Nothing to fail to obtain, so only the policy-driven answers remain:
+		// off proceeds, auto proceeds, on refuses.
+		for _, tt := range []struct {
+			policy  string
+			wantErr bool
+		}{
+			{sandboxOff, false},
+			{sandboxAuto, false},
+			{sandboxOn, true},
+		} {
+			cfg := Config{SandboxPolicy: tt.policy, Security: SecurityState{Probe: "no platform sandbox is available"}}
+			if err := requireEffectiveSandbox(cfg); (err != nil) != tt.wantErr {
+				t.Fatalf("policy %s: error = %v, want error = %v", tt.policy, err, tt.wantErr)
+			}
+		}
+		return
+	}
+
+	t.Run("a sandbox that held lets any policy through", func(t *testing.T) {
+		for _, policy := range []string{sandboxAuto, sandboxOn, sandboxOff} {
+			cfg := Config{SandboxPolicy: policy, Security: SecurityState{Backend: backend}}
+			if err := requireEffectiveSandbox(cfg); err != nil {
+				t.Fatalf("policy %s: error = %v, want none", policy, err)
+			}
+		}
+	})
+
+	t.Run("off is a choice and is honoured", func(t *testing.T) {
+		cfg := Config{SandboxPolicy: sandboxOff, Security: SecurityState{EffectivePolicy: sandboxOff}}
+		if err := requireEffectiveSandbox(cfg); err != nil {
+			t.Fatalf("error = %v, want none", err)
+		}
+	})
+
+	t.Run("auto stops where the backend exists and did not hold", func(t *testing.T) {
+		cfg := Config{SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Probe: "sandbox probe path remained readable"}}
+		err := requireEffectiveSandbox(cfg)
+		if err == nil {
+			t.Fatal("error = nil, want a refusal to run unfenced")
+		}
+		// Whoever hits this needs both halves: what went wrong, and how to say
+		// they meant it.
+		if !strings.Contains(err.Error(), "probe path remained readable") || !strings.Contains(err.Error(), "--sandbox off") {
+			t.Fatalf("error = %q, want the probe reason and the way out", err)
+		}
+	})
+
+	t.Run("auto continues where a trusted container was detected", func(t *testing.T) {
+		cfg := Config{SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff, Container: "podman"}}
+		if err := requireEffectiveSandbox(cfg); err != nil {
+			t.Fatalf("error = %v, want none: the outer isolation is the isolation", err)
+		}
+	})
+
+	t.Run("on refuses even inside a container", func(t *testing.T) {
+		cfg := Config{SandboxPolicy: sandboxOn, Security: SecurityState{EffectivePolicy: sandboxOn, Probe: "probe failed"}}
+		err := requireEffectiveSandbox(cfg)
+		if err == nil || !strings.HasPrefix(err.Error(), "required sandbox probe failed: ") {
+			t.Fatalf("error = %v, want the unchanged on message", err)
+		}
+	})
 }
 
 func TestSandboxUnavailableNotice(t *testing.T) {

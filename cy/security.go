@@ -158,15 +158,43 @@ func unavailableSandbox(state SecurityState, probe string) SecurityState {
 
 func (s SecurityState) Active() bool { return s.Backend != "" }
 
+// requireEffectiveSandbox decides whether a run that did not get a sandbox may
+// proceed. It may when it asked for none; when the platform has none to give,
+// since a build with no backend at all would otherwise refuse to start under
+// the default policy, which is not a choice anyone made; and when a trusted
+// container was detected, which is Cy deciding the outer isolation is the
+// isolation rather than failing to obtain the inner one.
+//
+// It may not when a backend exists here and did not hold. That is a fact about
+// this machine worth stopping for, and running without isolation should be
+// something asked for rather than something arrived at.
+func requireEffectiveSandbox(cfg Config) error {
+	if cfg.SandboxPolicy == sandboxOff || cfg.Security.Active() {
+		return nil
+	}
+	if cfg.SandboxPolicy == sandboxOn {
+		return fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe)
+	}
+	if cfg.Security.Container != "" {
+		return nil
+	}
+	backend := toolruntime.SandboxBackend()
+	if backend == "" {
+		return nil
+	}
+	return fmt.Errorf("%s is available here but the sandbox probe failed: %s (pass --sandbox off to run without one)", backend, cfg.Security.Probe)
+}
+
 // sandboxUnavailableNotice reports what to say when the run asked for a sandbox
 // and is not getting one. It returns "" when there is nothing to report: when
 // the fence is in place, when it was switched off deliberately, or when the
 // interactive startup line is showing the state anyway.
 //
-// The case it exists for is a scripted run under the default policy, which
-// falls back to no sandbox at all and today says so nowhere. Both ways of
-// arriving there are worth a line, since neither was asked for by name: a
-// probe that did not come back clean, and a container Cy decided to trust.
+// The cases it exists for are the two that requireEffectiveSandbox lets past: a
+// platform with no backend to offer, and a container Cy decided to trust.
+// Neither was asked for by name, and a scripted run would otherwise hear
+// nothing. Where a backend does exist and did not hold, the run has already
+// stopped rather than reached here.
 func sandboxUnavailableNotice(cfg Config) string {
 	if !cfg.PrintMode || cfg.SandboxPolicy != sandboxAuto || cfg.Security.Active() {
 		return ""

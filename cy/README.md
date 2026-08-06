@@ -171,10 +171,16 @@ compacted automatically when needed; `/context` shows the current budget and
 ## Security
 
 `CY_SANDBOX=auto` selects the available platform filesystem sandbox: Landlock
-on Linux and Seatbelt on macOS. On Linux it disables the inner sandbox when Cy
-confidently detects a known OS container (Docker, Podman, LXC/Incus, OpenVZ, or
-systemd-nspawn). `on` requires a working platform sandbox; `off` disables it.
-Use `/sandbox` to change and remember the policy during an interactive session.
+on Linux and Seatbelt on macOS. It fails startup when that backend exists here
+and could not be obtained: a sandbox the platform can provide but did not is a
+fact about the machine worth stopping for, and running without isolation is
+something to ask for rather than to arrive at. It continues where there is no
+backend to offer at all, and on Linux where Cy confidently detects a known OS
+container (Docker, Podman, LXC/Incus, OpenVZ, or systemd-nspawn), whose
+isolation it trusts instead; both say so on stderr. `on` requires a working
+platform sandbox, including there; `off` disables it. Use `/sandbox` to change
+and remember the policy during an interactive session — it applies the same
+rule, so a policy this machine cannot honour is refused where you ask for it.
 
 When the effective policy is `off`, model-requested Bash inherits the ambient
 environment, real `HOME`, and user permissions. Sandboxed processes instead

@@ -389,8 +389,12 @@ func (a *sessionAgent) SwitchSandbox(value string) error {
 	}
 	cfg.SandboxPolicy = policy
 	security := buildSecurityState(context.Background(), cfg, a.root, a.state)
-	if security.EffectivePolicy == sandboxOn && !security.Active() {
-		return fmt.Errorf("required sandbox probe failed: %s", security.Probe)
+	cfg.Security = security
+	// The same rule as at startup, through the same function: switching to a
+	// policy the machine cannot honour should be refused where it is asked for,
+	// and two copies of the decision would drift.
+	if err := requireEffectiveSandbox(cfg); err != nil {
+		return err
 	}
 
 	a.mu.Lock()
