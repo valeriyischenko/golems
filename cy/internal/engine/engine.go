@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/levmv/golems/cy/internal/session"
@@ -72,9 +73,11 @@ type Config struct {
 // be told to the model at the next turn boundary. JobID names the background job
 // it reports on, where there is one; it travels beside the text so that the
 // journal can record which job was reported without parsing the sentence.
+// FinishedAt is when the work ended, as against when this is delivered.
 type BoundaryEvent struct {
-	JobID   string
-	Content string
+	JobID      string
+	FinishedAt time.Time
+	Content    string
 }
 
 // Engine is a TUI-independent, stepwise executor. The journal is authoritative:
@@ -442,9 +445,10 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 			// next boundary, and repeats none of the ones already written.
 			for _, event := range boundary {
 				if _, err := e.session.Append(session.RecordBoundaryEvent, session.BoundaryEvent{
-					RunID:   runID,
-					JobID:   event.JobID,
-					Content: e.sanitize(event.Content),
+					RunID:      runID,
+					JobID:      event.JobID,
+					FinishedAt: event.FinishedAt,
+					Content:    e.sanitize(event.Content),
 				}); err != nil {
 					return nil, err
 				}

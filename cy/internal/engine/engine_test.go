@@ -797,7 +797,8 @@ func TestEngineJournalsBoundaryEventsItDelivers(t *testing.T) {
 	}
 	defer s.Close()
 	model := &scriptedModel{chatResponses: []*llm.Response{{Content: "noted"}}}
-	event := BoundaryEvent{JobID: "job-4f2a", Content: "Background job job-4f2a completed: status=failed, error=token s3cret rejected."}
+	finishedAt := time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC)
+	event := BoundaryEvent{JobID: "job-4f2a", FinishedAt: finishedAt, Content: "Background job job-4f2a completed: status=failed, error=token s3cret rejected."}
 	served := false
 	eng, err := New(Config{
 		Model:   model,
@@ -855,6 +856,16 @@ func TestEngineJournalsBoundaryEventsItDelivers(t *testing.T) {
 	}
 	if recorded[0].RunID == "" {
 		t.Fatal("recorded boundary event has no run id")
+	}
+	// Both times, and they are not the same one: when the work ended is carried
+	// on the payload, when the model was told is the record's own timestamp.
+	if !recorded[0].FinishedAt.Equal(finishedAt) {
+		t.Fatalf("recorded finish time = %s, want %s", recorded[0].FinishedAt, finishedAt)
+	}
+	for _, record := range records {
+		if record.Type == session.RecordBoundaryEvent && !record.Timestamp.After(finishedAt) {
+			t.Fatalf("delivery at %s is not after the work finished at %s", record.Timestamp, finishedAt)
+		}
 	}
 
 	// The point of the record: a reconstruction of the session has to show the

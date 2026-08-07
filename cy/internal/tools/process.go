@@ -468,12 +468,14 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 	close(job.done)
 }
 
-// CompletionEvent is one background job reporting that it finished. The id
-// travels beside the text, rather than only inside it, so a caller can record
-// which job was reported without reading the sentence back.
+// CompletionEvent is one background job reporting that it finished. The id and
+// the time travel beside the text, rather than only inside it, so a caller can
+// record which job was reported, and when it ended, without reading the
+// sentence back.
 type CompletionEvent struct {
-	JobID   string
-	Content string
+	JobID      string
+	FinishedAt time.Time
+	Content    string
 }
 
 // PendingCompletionEvents reports background completions nobody has been told
@@ -506,6 +508,7 @@ func (m *processManager) PendingCompletionEvents(_ string) ([]CompletionEvent, e
 		exitCode := job.exitCode
 		errText := job.errText
 		id := job.id
+		finishedAt := job.finishedAt
 		job.mu.Unlock()
 		content := fmt.Sprintf("Background job %s completed: status=%s", id, status)
 		if exitCode != nil {
@@ -515,7 +518,7 @@ func (m *processManager) PendingCompletionEvents(_ string) ([]CompletionEvent, e
 			content += ", error=" + errText
 		}
 		content += ". Inspect output with job(action=\"output\", job_id=\"" + id + "\")."
-		pending = append(pending, CompletionEvent{JobID: id, Content: content})
+		pending = append(pending, CompletionEvent{JobID: id, FinishedAt: finishedAt, Content: content})
 	}
 	return pending, nil
 }

@@ -249,10 +249,18 @@ type CompactionCompleted struct {
 // than only spelled inside it so that a delivery can be matched to the tool call
 // that started the job — the call's own record already carries the id in its
 // result metadata — without parsing prose.
+//
+// FinishedAt is when the work ended, which is not the record's own timestamp:
+// that one says when the model was told. The gap between them is the thing a
+// deferred result has and an ordinary one does not, and reading it back is how
+// one tells a job that took ten minutes from a completion that sat undelivered
+// for ten minutes. Omitted rather than zeroed when there is no such time,
+// because a boundary event need not always report finished work.
 type BoundaryEvent struct {
-	RunID   string `json:"run_id"`
-	JobID   string `json:"job_id,omitempty"`
-	Content string `json:"content"`
+	RunID      string    `json:"run_id"`
+	JobID      string    `json:"job_id,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Content    string    `json:"content"`
 }
 
 func DecodePayload[T any](record Record) (T, error) {

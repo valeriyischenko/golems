@@ -346,6 +346,10 @@ func TestPendingCompletionEventsRepeatUntilAcknowledged(t *testing.T) {
 	if len(first) != 1 || first[0].JobID != id {
 		t.Fatalf("pending = %#v, want the finished job", first)
 	}
+	// Reported, not inferred from when the caller happened to ask.
+	if first[0].FinishedAt.IsZero() {
+		t.Fatalf("pending completion carries no finish time: %#v", first[0])
+	}
 	again, err := manager.PendingCompletionEvents("run-1")
 	if err != nil {
 		t.Fatal(err)

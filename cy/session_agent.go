@@ -646,7 +646,7 @@ func boundaryEventsFrom(processes *toolruntime.ProcessManager) func(string) ([]e
 		}
 		events := make([]engine.BoundaryEvent, 0, len(completions))
 		for _, completion := range completions {
-			events = append(events, engine.BoundaryEvent{JobID: completion.JobID, Content: completion.Content})
+			events = append(events, engine.BoundaryEvent{JobID: completion.JobID, FinishedAt: completion.FinishedAt, Content: completion.Content})
 		}
 		return events, nil
 	}
