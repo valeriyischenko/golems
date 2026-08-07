@@ -68,7 +68,11 @@ type Config struct {
 	// any failure in between.
 	BoundaryEvents         func(runID string) ([]BoundaryEvent, error)
 	BoundaryEventDelivered func(jobID string) error
-	Sanitize               func(string) string
+	// DetachedJobs reports the work that will be left running, asked as a run
+	// closes rather than tracked here: what is still going is known only to
+	// whoever started it, and only at the moment of asking.
+	DetachedJobs func() []string
+	Sanitize     func(string) string
 }
 
 // BoundaryEvent is something that happened outside the conversation and has to
@@ -106,6 +110,7 @@ type Engine struct {
 	jobLauncher            string
 	boundaryEvents         func(runID string) ([]BoundaryEvent, error)
 	boundaryEventDelivered func(jobID string) error
+	detachedJobs           func() []string
 	sanitize               func(string) string
 	// recordedConfig is the last configuration written to the journal, or what a
 	// resume found there, in the encoding it was recorded in. Held rather than
@@ -164,6 +169,7 @@ func New(cfg Config) (*Engine, error) {
 		jobLauncher:            cfg.JobLauncher,
 		boundaryEvents:         cfg.BoundaryEvents,
 		boundaryEventDelivered: cfg.BoundaryEventDelivered,
+		detachedJobs:           cfg.DetachedJobs,
 		sanitize:               sanitize,
 		baseURL:                strings.TrimSpace(cfg.BaseURL),
 		contextWindow:          cfg.ContextWindow,
@@ -487,6 +493,7 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 				RunID:            runID,
 				Outcome:          session.RunCompleted,
 				ToolLimitReached: toolLimitReached,
+				DetachedJobs:     e.detached(),
 			})
 			return err
 		},
@@ -559,9 +566,23 @@ func (e *Engine) recordToolLimit(runID string, calls []llm.ToolCall, messages []
 	return nil
 }
 
+// detached is the hook with the nil check in one place, since every run has to
+// close whether or not anything here can start a job.
+func (e *Engine) detached() []string {
+	if e.detachedJobs == nil {
+		return nil
+	}
+	return e.detachedJobs()
+}
+
 func (e *Engine) failRun(runID string, _ llm.Usage, cause error, toolLimitReached bool) error {
 	safeCause := sanitizeError(cause, e.sanitize)
-	finished := session.RunFinished{RunID: runID, Outcome: session.RunFailed, ToolLimitReached: toolLimitReached}
+	finished := session.RunFinished{
+		RunID:            runID,
+		Outcome:          session.RunFailed,
+		ToolLimitReached: toolLimitReached,
+		DetachedJobs:     e.detached(),
+	}
 	if safeCause != nil {
 		// The sanitized text rather than the original: journals are copied and
 		// read elsewhere, and an error can quote a URL or a header.

@@ -276,7 +276,7 @@ func (a *sessionAgent) runShell(ctx context.Context, command string, record bool
 			return "", toolruntime.ProcessResultMeta{}, err
 		}
 		if _, err := journal.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, ToolCalls: []llm.ToolCall{call}}); err != nil {
-			_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID, Outcome: session.RunFailed, Error: err.Error()})
+			_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID, Outcome: session.RunFailed, Error: err.Error(), DetachedJobs: processes.DetachedJobs()})
 			a.mu.RUnlock()
 			return "", toolruntime.ProcessResultMeta{}, errors.Join(err, finishErr)
 		}
@@ -316,7 +316,10 @@ func (a *sessionAgent) runShell(ctx context.Context, command string, record bool
 		// non-zero or is killed is an ordinary result for a shell the user asked
 		// for, and its fate is recorded in the tool result's meta. Failing to
 		// record that result is a different matter.
-		finished := session.RunFinished{RunID: runID, Outcome: session.RunCompleted}
+		// The user's own shell never detaches, but a job left over from an
+		// earlier turn may still be running, and the last run_finished in a
+		// journal is where a reader looks to see what outlived the session.
+		finished := session.RunFinished{RunID: runID, Outcome: session.RunCompleted, DetachedJobs: processes.DetachedJobs()}
 		if resultErr != nil {
 			finished.Outcome = session.RunFailed
 			finished.Error = resultErr.Error()
@@ -615,6 +618,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		JobLauncher:            cfg.JobLauncher,
 		BoundaryEvents:         boundaryEventsFrom(processes),
 		BoundaryEventDelivered: processes.MarkCompletionDelivered,
+		DetachedJobs:           processes.DetachedJobs,
 		Sanitize:               a.masker.Redact,
 	})
 	if err != nil {

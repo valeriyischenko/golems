@@ -6,7 +6,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -18,6 +22,7 @@ const (
 	jobResultFile  = "result.json"
 	jobOutputFile  = "output"
 	jobCommandFile = "command"
+	jobPidFile     = "pid"
 )
 
 // jobResult is a job's fate as a file: written by the supervisor, read by
@@ -68,6 +73,11 @@ func RunJobChildIfRequested() bool {
 }
 
 func superviseJob(mailbox, program string, args []string) int {
+	// The streams below are pipes Cy holds open, so a job that outlives Cy
+	// writes into a pipe with no reader -- and the default for that on standard
+	// output is death by SIGPIPE, which would kill the supervisor at the exact
+	// moment its file becomes the only record there is.
+	signal.Ignore(syscall.SIGPIPE)
 	started := time.Now().UTC()
 	command := exec.Command(program, args...)
 	command.Stdin = os.Stdin
@@ -81,11 +91,11 @@ func superviseJob(mailbox, program string, args []string) int {
 	// wants its answer on stdout kept clear of its logging on stderr. The file
 	// holds both either way, which is the one place the distinction is lost.
 	log := &jobBuffer{limit: defaultCommandLogLimit}
-	command.Stdout = io.MultiWriter(os.Stdout, log)
+	command.Stdout = io.MultiWriter(&passthrough{to: os.Stdout}, log)
 	if sameStream(os.Stdout, os.Stderr) {
 		command.Stderr = command.Stdout
 	} else {
-		command.Stderr = io.MultiWriter(os.Stderr, log)
+		command.Stderr = io.MultiWriter(&passthrough{to: os.Stderr}, log)
 	}
 	if err := command.Start(); err != nil {
 		// The program never ran. Nobody upstream can see this -- Cy forked the
@@ -133,6 +143,22 @@ func superviseJob(mailbox, program string, args []string) int {
 	// The program never ran, or ended in a way with no code of its own. 126 is
 	// what a shell says for "found it, could not run it".
 	return 126
+}
+
+// passthrough is the copy of a stream that Cy is watching live, and only that.
+// It stops at the first failed write and reports success regardless, so that
+// the reader going away ends the copying and nothing else: an io.MultiWriter
+// gives up on every writer at the first error, and the other writer here is the
+// job's own record.
+type passthrough struct{ to *os.File }
+
+func (p *passthrough) Write(data []byte) (int, error) {
+	if p.to != nil {
+		if _, err := p.to.Write(data); err != nil {
+			p.to = nil
+		}
+	}
+	return len(data), nil
 }
 
 // sameStream reports whether two of this process's streams are the same open
@@ -206,6 +232,22 @@ func readJobCommand(mailbox string) string {
 		return "(command not recorded)"
 	}
 	return string(raw)
+}
+
+// readJobPid reports the process group Cy left behind for this job, which is
+// the only handle a later run has on work that is still going. Zero when there
+// is none, which is every job Cy waited for and every mailbox written before
+// this file existed.
+func readJobPid(mailbox string) int {
+	raw, err := os.ReadFile(filepath.Join(mailbox, jobPidFile))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		return 0
+	}
+	return pid
 }
 
 // readJobOutput reports the tail the supervisor kept. Only ever present next to

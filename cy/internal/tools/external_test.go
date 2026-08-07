@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -531,6 +532,92 @@ func TestTheJobToolComesBackForAProfileThatKeepsABackgroundTool(t *testing.T) {
 	if again := manager.EnsureJobTool(got, declarations); len(again) != 2 {
 		t.Fatalf("tools = %d, want the job tool added once", len(again))
 	}
+}
+
+// Detached work is the one thing Cy leaves behind when it exits, and the
+// registry is the whole of what connects it to the session that started it.
+func TestDetachedWorkOutlivesTheRunAndTheNextRunAdoptsIt(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	gate := filepath.Join(t.TempDir(), "gate")
+	first := managerForSession(t, home, root, nil)
+	tool := externalToolForTest(t, first, waitForGate(gate)+`printf 'finished alone\n'`,
+		ExternalTool{Effect: "read", Background: BackgroundAlways, Detach: true})
+	result := runExternalToolForTest(t, tool, `{}`)
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok || meta.JobID == "" {
+		t.Fatalf("meta = %#v, want a job id", result.Meta)
+	}
+	// Named as the run closes, which is what the journal records.
+	if ids := first.DetachedJobs(); !slices.Equal(ids, []string{meta.JobID}) {
+		t.Fatalf("detached = %v, want %q", ids, meta.JobID)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "jobs", "session", meta.JobID)); err != nil {
+		t.Fatalf("the mailbox went with the run: %v", err)
+	}
+
+	second := managerForSession(t, home, root, nil)
+	job := second.get(meta.JobID)
+	if job == nil {
+		t.Fatal("the next run did not adopt the job")
+	}
+	if ids := second.DetachedJobs(); !slices.Equal(ids, []string{meta.JobID}) {
+		t.Fatalf("adopted job = %v, want it still running and still detached", ids)
+	}
+	// It ends under a Cy that never started it, and reports through the file
+	// the supervisor was writing all along.
+	openGate(t, gate)
+	<-job.done
+	if out, _ := job.snapshot(0); !strings.Contains(string(out), "finished alone") {
+		t.Fatalf("job output = %q", out)
+	}
+	pending, err := second.PendingCompletionEvents("")
+	if err != nil || len(pending) != 1 || pending[0].JobID != meta.JobID {
+		t.Fatalf("pending = %+v, err = %v", pending, err)
+	}
+}
+
+// The other end of the same story: work left running that is no longer there.
+// Dropping it silently would leave the model waiting on a job it was told had
+// started, so it is adopted with an ending of its own.
+func TestDetachedWorkThatIsGoneIsAdoptedAsAbandoned(t *testing.T) {
+	home := t.TempDir()
+	mailbox := filepath.Join(home, "jobs", "session", "job-dead")
+	if err := os.MkdirAll(mailbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mailbox, jobPidFile), []byte(deadPID(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := managerForSession(t, home, t.TempDir(), nil)
+	job := manager.get("job-dead")
+	if job == nil {
+		t.Fatal("a detached job with no result was dropped")
+	}
+	<-job.done
+	if job.status != jobAbandoned {
+		t.Fatalf("status = %q, want abandoned", job.status)
+	}
+	// Reported like any other ending, since that is the only way the model
+	// learns it will never get an answer.
+	pending, err := manager.PendingCompletionEvents("")
+	if err != nil || len(pending) != 1 || !strings.Contains(pending[0].Content, jobAbandoned) {
+		t.Fatalf("pending = %+v, err = %v", pending, err)
+	}
+}
+
+// deadPID is a process group leader that has already been reaped, which is
+// what a mailbox points at when the work it described is over.
+func deadPID(t *testing.T) string {
+	t.Helper()
+	command := exec.Command("sh", "-c", "exit 0")
+	configureProcessGroup(command)
+	if err := command.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return strconv.Itoa(command.Process.Pid)
 }
 
 // waitForGate blocks a test tool until the test says otherwise, which is how a

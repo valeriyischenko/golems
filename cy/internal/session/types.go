@@ -127,9 +127,13 @@ type ExternalToolConfig struct {
 	// Background and Yield say whether a call on this tool can end with the
 	// tool still running, which changes both the schema the model was shown and
 	// what a result means. Absent is the tool always being waited for.
-	Background string   `json:"background,omitempty"`
-	Yield      string   `json:"yield,omitempty"`
-	EnvNames   []string `json:"env_names,omitempty"`
+	Background string `json:"background,omitempty"`
+	Yield      string `json:"yield,omitempty"`
+	// Detach says the tool's work may still be running after Cy exits, and so
+	// that a later run adopting a job of this session can be traced back to the
+	// setting that let it happen.
+	Detach   bool     `json:"detach,omitempty"`
+	EnvNames []string `json:"env_names,omitempty"`
 }
 
 // SessionSettings are the operational bounds the session runs under: where the
@@ -228,6 +232,13 @@ type RunFinished struct {
 	// the turn. That is the same silence as an outcome-less record, not a claim
 	// the fuse held.
 	ToolLimitReached bool `json:"tool_limit_reached,omitempty"`
+	// DetachedJobs names the jobs that were still running when the run closed
+	// and were left running. Ordinary background work dies with Cy, so a job id
+	// in the journal is otherwise a thing of the past; these are the ones a
+	// later run can still find in the registry, adopt, and report on. Without
+	// them, a completion delivered in a session's second run refers to a job
+	// nothing in the first run says survived it.
+	DetachedJobs []string `json:"detached_jobs,omitempty"`
 }
 
 // ToolResultsPruned records a provider-facing context boundary. Original tool

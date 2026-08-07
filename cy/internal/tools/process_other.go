@@ -12,3 +12,10 @@ func killProcessGroup(command *exec.Cmd) error {
 	}
 	return command.Process.Kill()
 }
+
+// processGroupAlive has no answer here: without process groups there is nothing
+// to ask about, and claiming a detached job is alive would strand it. Detached
+// work is a Unix affordance and reads as gone everywhere else.
+func processGroupAlive(int) bool { return false }
+
+func killProcessGroupByPID(int) error { return nil }

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ const (
 	defaultJobWait         = time.Minute
 	maxCommandSummary      = 120
 	jobToolName            = "job"
+	detachedPollInterval   = 500 * time.Millisecond
 )
 
 const (
@@ -47,6 +49,11 @@ const (
 	// supervisor can see it -- Cy forks the supervisor, which starts fine --
 	// and because it is the one outcome no amount of rephrasing will fix.
 	jobNotStarted = "not_started"
+	// jobAbandoned is detached work that left no ending: the process is gone
+	// and no supervisor wrote a result. Not failed, because nobody saw it fail,
+	// and not unknown, because that would describe what Cy knows rather than
+	// what became of the job. The work was left running and then lost.
+	jobAbandoned = "abandoned"
 )
 
 const (
@@ -56,6 +63,7 @@ const (
 	JobKilled     = jobKilled
 	JobTimedOut   = jobTimedOut
 	JobNotStarted = jobNotStarted
+	JobAbandoned  = jobAbandoned
 )
 
 type processOrigin uint8
@@ -74,6 +82,10 @@ type processManager struct {
 	logLimit        int64
 	sandbox         string
 	allowBackground bool
+
+	// stopped releases the watchers of detached jobs, which are polling a file
+	// rather than waiting on a process and would otherwise outlive Close.
+	stopped chan struct{}
 
 	mu     sync.Mutex
 	jobs   map[string]*processJob
@@ -100,6 +112,11 @@ type processJob struct {
 	finishedAt     time.Time
 	completionSeen bool
 	userInitiated  bool
+	// detached is work Cy will leave running when it exits, and pid is the
+	// process group it is left in -- the only handle a later run has on it,
+	// since a process nobody forked cannot be waited on.
+	detached bool
+	pid      int
 }
 
 // jobBuffer continuously drains process output while retaining only a bounded
@@ -180,6 +197,7 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 		logLimit:        defaultCommandLogLimit,
 		sandbox:         opts.Sandbox,
 		allowBackground: opts.Background,
+		stopped:         make(chan struct{}),
 		jobs:            make(map[string]*processJob),
 	}
 	manager.adoptMailboxes(opts.Delivered)
@@ -191,10 +209,11 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 // entry here: the model can be told it ended, and can read its output, exactly
 // as if this process had started it.
 //
-// A job without one is a job whose supervisor never got to write, which today
-// can only mean it died with the run that started it -- nothing yet outlives
-// Cy. Its mailbox is removed. C10f is what gives a job the right to be still
-// running here, and it is that commit's business to tell the two apart.
+// A job without one either is still running, which only detached work can be,
+// or died leaving no account of itself. The pid Cy wrote down when it detached
+// the job is what tells those apart, and a job whose group is gone is adopted
+// as abandoned rather than dropped: the model was told the work was under way,
+// and silence is the one answer it cannot act on.
 //
 // Best effort throughout. An unreadable registry costs the run its outstanding
 // completions, which is bad, but refusing to start costs it everything.
@@ -211,7 +230,14 @@ func (m *processManager) adoptMailboxes(delivered map[string]struct{}) {
 		mailbox := m.mailboxFor(id)
 		result, ok := readJobResult(mailbox)
 		if !ok {
-			_ = os.RemoveAll(mailbox)
+			pid := readJobPid(mailbox)
+			if pid == 0 {
+				// Never detached, so it died with the run that started it and
+				// there is nothing here to report.
+				_ = os.RemoveAll(mailbox)
+				continue
+			}
+			m.adoptDetached(id, mailbox, pid, contains(delivered, id))
 			continue
 		}
 		job := &processJob{
@@ -237,6 +263,67 @@ func (m *processManager) adoptMailboxes(delivered map[string]struct{}) {
 			continue
 		}
 		m.jobs[id] = job
+	}
+}
+
+// adoptDetached takes over work an earlier run left running. There is no
+// process to wait on -- Cy did not fork it -- so the result file is watched
+// instead, which is the same file the supervisor would have been writing all
+// along and the reason delivery reads files rather than exit statuses.
+func (m *processManager) adoptDetached(id, mailbox string, pid int, seen bool) {
+	job := &processJob{
+		id:        id,
+		command:   readJobCommand(mailbox),
+		mailbox:   mailbox,
+		log:       &jobBuffer{limit: m.logLimit},
+		done:      make(chan struct{}),
+		status:    jobRunning,
+		startedAt: time.Now().UTC(),
+		detached:  true,
+		pid:       pid,
+	}
+	// Its own start time is lost with the process that knew it, so a duration
+	// here would be measured from the adoption rather than from the start. It
+	// is left to the result file, which has the real one.
+	m.jobs[id] = job
+	go m.watchDetached(job, seen)
+}
+
+// watchDetached polls a mailbox Cy cannot wait on. Polling because there is no
+// portable way to be told about a process that is not a child, and cheap enough
+// at this interval that the alternative is not worth its complexity.
+func (m *processManager) watchDetached(job *processJob, seen bool) {
+	for {
+		if result, ok := readJobResult(job.mailbox); ok {
+			job.mu.Lock()
+			job.status = cmp.Or(result.Status, jobCompleted)
+			job.exitCode = result.ExitCode
+			job.errText = result.Error
+			job.startedAt = cmp.Or(result.StartedAt, job.startedAt)
+			job.finishedAt = cmp.Or(result.FinishedAt, time.Now().UTC())
+			job.completionSeen = seen
+			if tail, ok := readJobOutput(job.mailbox); ok {
+				job.log.adopt(tail, result.OutputBytes)
+			}
+			job.mu.Unlock()
+			close(job.done)
+			return
+		}
+		if !processGroupAlive(job.pid) {
+			job.mu.Lock()
+			job.status = jobAbandoned
+			job.errText = "the process was gone and left no result"
+			job.finishedAt = time.Now().UTC()
+			job.completionSeen = seen
+			job.mu.Unlock()
+			close(job.done)
+			return
+		}
+		select {
+		case <-m.stopped:
+			return
+		case <-time.After(detachedPollInterval):
+		}
 	}
 }
 
@@ -270,6 +357,29 @@ func (m *processManager) Status(jobID string) (ProcessResultMeta, bool) {
 		return ProcessResultMeta{}, false
 	}
 	return m.processMeta(job, true), true
+}
+
+// DetachedJobs names the work that is still running and will be left running.
+// Asked at the end of a run so that the journal can say what Cy walked away
+// from: the ids are the only way a reader, or the next run, can tell work that
+// was still going from work that was killed on the way out.
+func (m *processManager) DetachedJobs() []string {
+	m.mu.Lock()
+	jobs := make([]*processJob, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		jobs = append(jobs, job)
+	}
+	m.mu.Unlock()
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].startedAt.Before(jobs[j].startedAt) })
+	var ids []string
+	for _, job := range jobs {
+		job.mu.Lock()
+		if job.detached && job.status == jobRunning {
+			ids = append(ids, job.id)
+		}
+		job.mu.Unlock()
+	}
+	return ids
 }
 
 // SetSandbox changes the policy used for future agent-originated Bash
@@ -512,6 +622,9 @@ func (m *processManager) listJobs() string {
 		if job.exitCode != nil {
 			fmt.Fprintf(&out, " exit_code=%d", *job.exitCode)
 		}
+		if job.detached && job.status == jobRunning {
+			out.WriteString(" detached")
+		}
 		fmt.Fprintf(&out, " %s\n", summarizeCommand(job.command))
 		job.mu.Unlock()
 	}
@@ -550,6 +663,10 @@ type jobSpec struct {
 	// and has nobody to deliver its completion to but the person who typed it.
 	supervise     bool
 	userInitiated bool
+	// detach asks for the job to be left running when Cy exits. Only ever set
+	// for a supervised job: a detached job reports by leaving a file behind,
+	// and without a supervisor there is nothing to leave one.
+	detach bool
 }
 
 func (m *processManager) startJob(spec jobSpec) (*processJob, error) {
@@ -590,6 +707,12 @@ func (m *processManager) startJob(spec jobSpec) (*processJob, error) {
 	if err := process.Start(); err != nil {
 		return nil, err
 	}
+	// Cy's pid for the group, not the supervisor's for itself: the group leader
+	// is what Cy forked and the only thing Cy can later signal, wherever a
+	// configured launcher took the work from there.
+	if mailbox != "" && spec.detach {
+		_ = writeJobFile(mailbox, jobPidFile, []byte(strconv.Itoa(process.Process.Pid)))
+	}
 	job := &processJob{
 		id:            id,
 		command:       spec.command,
@@ -601,6 +724,8 @@ func (m *processManager) startJob(spec jobSpec) (*processJob, error) {
 		status:        jobRunning,
 		startedAt:     time.Now().UTC(),
 		userInitiated: spec.userInitiated,
+		detached:      spec.detach,
+		pid:           process.Process.Pid,
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -827,10 +952,21 @@ func (m *processManager) stop(ctx context.Context, id, reason string) (*processJ
 		return job, nil
 	}
 	job.stopReason = reason
+	pid := job.pid
+	adopted := job.cmd == nil
 	job.mu.Unlock()
 	stopped := make(chan struct{})
 	defer close(stopped)
-	go keepKillingProcessGroup(job.cmd, stopped)
+	// A job this process started is signalled through the handle it was started
+	// with; one adopted from the registry has only the pid Cy wrote down, and
+	// its watcher notices the group go quiet in its own time.
+	if adopted {
+		if err := killProcessGroupByPID(pid); err != nil {
+			return job, err
+		}
+	} else {
+		go keepKillingProcessGroup(job.cmd, stopped)
+	}
 	select {
 	case <-job.done:
 		return job, nil
@@ -899,14 +1035,21 @@ func (m *processManager) Close() error {
 		jobs = append(jobs, job)
 	}
 	m.mu.Unlock()
+	close(m.stopped)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var errs []error
 	for _, job := range jobs {
 		job.mu.Lock()
 		running := job.status == jobRunning
+		detached := job.detached
 		mailbox := job.mailbox
 		job.mu.Unlock()
+		// Left where it is, with its mailbox: that is what detached means, and
+		// the mailbox is the whole of what the next run has to find it by.
+		if running && detached {
+			continue
+		}
 		if running {
 			if _, err := m.stop(ctx, job.id, "cy exiting"); err != nil {
 				errs = append(errs, err)
@@ -936,6 +1079,7 @@ func (m *processManager) formatJob(job *processJob, output []byte, includeOutput
 	status := job.status
 	exitCode := job.exitCode
 	errText := job.errText
+	detached := job.detached
 	job.mu.Unlock()
 	var out strings.Builder
 	if managed {
@@ -952,6 +1096,12 @@ func (m *processManager) formatJob(job *processJob, output []byte, includeOutput
 		out.WriteString("truncated: true\n")
 	}
 	if status == jobRunning {
+		// Said only while it matters. Once the job has ended it outlived
+		// nothing, and the line would be describing a permission rather than
+		// the state of the work.
+		if detached {
+			out.WriteString("detached: true\n")
+		}
 		out.WriteString("continue: job(action=\"wait\"|\"output\"|\"stop\", job_id=\"" + job.id + "\")\n")
 	}
 	if includeOutput {
@@ -972,6 +1122,7 @@ func (m *processManager) processMeta(job *processJob, managed bool) processResul
 		ExitCode:       job.exitCode,
 		DurationMillis: jobDuration(job.startedAt, job.finishedAt).Milliseconds(),
 		UserInitiated:  job.userInitiated,
+		Detached:       job.detached,
 	}
 	if managed {
 		meta.JobID = job.id

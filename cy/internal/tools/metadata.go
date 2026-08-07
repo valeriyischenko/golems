@@ -18,6 +18,10 @@ type ProcessResultMeta struct {
 	DiscardedBytes int64  `json:"discarded_bytes,omitempty"`
 	FailureTail    string `json:"failure_tail,omitempty"`
 	UserInitiated  bool   `json:"user_initiated,omitempty"`
+	// Detached says this job outlives the run. A running job is usually gone
+	// when Cy exits and this one is not, which changes what the id is worth:
+	// it still means something in the next run of the session.
+	Detached bool `json:"detached,omitempty"`
 }
 
 type processResultMeta = ProcessResultMeta

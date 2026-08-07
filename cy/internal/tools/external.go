@@ -54,6 +54,15 @@ type ExternalTool struct {
 	// the model's. A build nobody should background on purpose still should not
 	// hold a turn open for ten minutes.
 	Yield int `json:"yield,omitempty"`
+	// Detach lets this tool's work survive the run that started it. Cy stops
+	// every other job on the way out; a detached one is left where it is, and
+	// the next run of the same session picks it up from the registry.
+	//
+	// Off by default, and deliberately per tool rather than per run. A process
+	// Cy no longer supervises is a process nobody will notice going wrong, so
+	// it is worth having only for the few tools whose work is the point --
+	// an index, a build, a sync -- and worth stating one tool at a time.
+	Detach bool `json:"detach,omitempty"`
 }
 
 // BackgroundMode is who decides that a configured tool keeps running after the
@@ -191,6 +200,12 @@ func (t *ExternalTool) normalize() error {
 	if t.Yield > 0 && t.Background == BackgroundAlways {
 		return errors.New("yield is how long a foreground call waits, and background always never makes one")
 	}
+	// Nothing to detach from otherwise: a call that is always waited for is
+	// over before Cy is, so the setting would never come into play and reading
+	// the file would suggest it might.
+	if t.Detach && t.Background == BackgroundNever && t.Yield == 0 {
+		return errors.New("detach needs work that can outlast its call; set background to auto or always, or give the tool a yield")
+	}
 	t.Workdir = strings.TrimSpace(t.Workdir)
 	if filepath.IsAbs(t.Workdir) {
 		return fmt.Errorf("workdir %q must be relative to the workspace root", t.Workdir)
@@ -225,7 +240,7 @@ func (t ExternalTool) timeout() time.Duration {
 // The background mode is the one that will be used and not the one that was
 // written, because a run with background turned off runs every configured tool
 // in the foreground and the file alone would not say so.
-func (t ExternalTool) rendered(program string, mode BackgroundMode, yield time.Duration) session.ExternalToolConfig {
+func (t ExternalTool) rendered(program string, mode BackgroundMode, yield time.Duration, detach bool) session.ExternalToolConfig {
 	config := session.ExternalToolConfig{
 		Name:    t.Name,
 		Effect:  t.Effect,
@@ -240,6 +255,7 @@ func (t ExternalTool) rendered(program string, mode BackgroundMode, yield time.D
 	if yield > 0 {
 		config.Yield = yield.String()
 	}
+	config.Detach = detach
 	for name := range t.Env {
 		config.EnvNames = append(config.EnvNames, name)
 	}
@@ -283,6 +299,7 @@ func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Too
 			return nil, nil, fmt.Errorf("tool %s: %w", declaration.Name, err)
 		}
 		mode, yield := m.externalBackground(declaration)
+		detach := m.externalDetach(declaration)
 		parameters := declaration.Parameters
 		if mode == BackgroundAuto {
 			parameters = withBackgroundArg(parameters)
@@ -292,9 +309,9 @@ func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Too
 			declaration.Name,
 			declaration.Description,
 			parameters,
-			m.externalRunner(declaration, program, mode, yield),
+			m.externalRunner(declaration, program, mode, yield, detach),
 		))
-		configs = append(configs, declaration.rendered(program, mode, yield))
+		configs = append(configs, declaration.rendered(program, mode, yield, detach))
 	}
 	return tools, configs, nil
 }
@@ -331,6 +348,13 @@ func (m *processManager) canBackground(t ExternalTool) bool {
 	return mode != BackgroundNever || yield > 0
 }
 
+// externalDetach is whether this tool's work may be left running when Cy exits.
+// Nothing can be in a run where nothing outlives its call, so the two settings
+// are read together rather than separately.
+func (m *processManager) externalDetach(t ExternalTool) bool {
+	return t.Detach && m.canBackground(t)
+}
+
 // resolveExternalProgram finds the executable a declaration names. A bare name
 // comes from PATH, as a shell would find it; anything with a separator is a
 // path, and a relative one is relative to the workspace so that a tool checked
@@ -364,7 +388,7 @@ func (m *processManager) resolveExternalProgram(program string) (string, error) 
 	return resolved, nil
 }
 
-func (m *processManager) externalRunner(declaration ExternalTool, program string, mode BackgroundMode, yield time.Duration) golem.ToolFunc {
+func (m *processManager) externalRunner(declaration ExternalTool, program string, mode BackgroundMode, yield time.Duration, detach bool) golem.ToolFunc {
 	timeout := declaration.timeout()
 	return func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {
 		arguments, err := externalCallArguments(call)
@@ -421,6 +445,7 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 			stdin:     bytes.NewReader(arguments),
 			stderr:    &jobBuffer{limit: m.logLimit},
 			supervise: true,
+			detach:    detach,
 		})
 		if err != nil {
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: start %s: %v", golem.ErrToolFatal, declaration.Name, program, err)
