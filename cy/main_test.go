@@ -180,6 +180,33 @@ func TestNormalizeBackground(t *testing.T) {
 	}
 }
 
+func TestNormalizeJobLauncher(t *testing.T) {
+	for _, input := range []string{"", "   "} {
+		got, err := normalizeJobLauncher(input)
+		if err != nil || got != "" {
+			t.Fatalf("normalizeJobLauncher(%q) = %q, %v; want the built-in supervisor", input, got, err)
+		}
+	}
+	launcher := filepath.Join(t.TempDir(), "launcher.sh")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := normalizeJobLauncher(" " + launcher + " "); err != nil || got != launcher {
+		t.Fatalf("normalizeJobLauncher = %q, %v; want %q", got, err, launcher)
+	}
+	// Resolved at startup, so a launcher that is not there is exit 2 before the
+	// model is told it can run commands rather than a failure at the first job.
+	notExecutable := filepath.Join(t.TempDir(), "plain.txt")
+	if err := os.WriteFile(notExecutable, []byte("not a program"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{filepath.Join(t.TempDir(), "absent"), notExecutable} {
+		if _, err := normalizeJobLauncher(input); err == nil {
+			t.Fatalf("normalizeJobLauncher(%q) accepted something it cannot run", input)
+		}
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func TestLoadPromptFile(t *testing.T) {

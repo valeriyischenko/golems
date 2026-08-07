@@ -721,7 +721,7 @@ func TestConfiguredToolDescriptionsFollowTheProfileFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	processes, err := toolruntime.NewProcessManager(t.TempDir(), t.TempDir(), "off", false)
+	processes, err := toolruntime.NewProcessManager(toolruntime.ProcessOptions{Root: t.TempDir(), Home: t.TempDir(), Sandbox: "off"})
 	if err != nil {
 		t.Fatal(err)
 	}

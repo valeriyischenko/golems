@@ -239,7 +239,7 @@ func runFencedExternalProbe(t *testing.T, workspace, home, script string) string
 	if err != nil {
 		t.Skip("bash is unavailable")
 	}
-	manager, err := NewProcessManager(workspace, home, sandboxOn, true)
+	manager, err := NewProcessManager(ProcessOptions{Root: workspace, Home: home, Sandbox: sandboxOn, Background: true})
 	if err != nil {
 		t.Fatal(err)
 	}

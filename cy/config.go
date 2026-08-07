@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -46,6 +47,9 @@ type Config struct {
 	// caller saying nothing, which is not the same as saying no; see
 	// BackgroundJobs for what decides it then.
 	Background *bool
+	// JobLauncher is the resolved path of the program that supervises a job.
+	// Empty is the built-in supervisor.
+	JobLauncher string
 	// ToolsFile and ExternalTools are the declared tool catalog: where it was
 	// read from, and what it said. Read once at startup rather than per call,
 	// so every turn of a session offers the same tools and the session can
@@ -208,6 +212,24 @@ func normalizeBackground(value string) (*bool, error) {
 		return nil, fmt.Errorf("invalid background setting %q; expected true or false", value)
 	}
 	return &allowed, nil
+}
+
+// normalizeJobLauncher resolves the program that will supervise this session's
+// jobs. Empty asks for the built-in supervisor, which is Cy re-exec'd.
+//
+// Resolved at startup and not at the first job: a launcher that is not there is
+// a mistake in configuration, and it should end the run before the model is
+// told it can run commands rather than at turn 40.
+func normalizeJobLauncher(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	resolved, err := exec.LookPath(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid job launcher %q: %w", value, err)
+	}
+	return resolved, nil
 }
 
 func normalizeTerminalTheme(value string) (string, error) {

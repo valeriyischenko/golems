@@ -223,6 +223,61 @@ func TestJobWaitReturnsOnCompletionAndOnAnExpiredBound(t *testing.T) {
 	}
 }
 
+func TestASupervisorRecordsTheJobsFateWhereAnotherProcessCouldReadIt(t *testing.T) {
+	manager := processManagerForTest(t)
+	id := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "printf supervised; exit 5", Background: true}))
+	job := manager.get(id)
+	<-job.done
+
+	result, ok := readJobResult(manager.mailboxFor(id))
+	if !ok {
+		t.Fatalf("nothing in the mailbox at %s", manager.mailboxFor(id))
+	}
+	if result.ExitCode == nil || *result.ExitCode != 5 || result.Pid == 0 || result.FinishedAt.IsZero() {
+		t.Fatalf("recorded result = %#v", result)
+	}
+	job.mu.Lock()
+	code, status := job.exitCode, job.status
+	job.mu.Unlock()
+	if status != jobFailed || code == nil || *code != 5 {
+		t.Fatalf("job = %s / %v, want failed with exit 5", status, code)
+	}
+}
+
+func TestAConfiguredLauncherSupervisesTheJobAndItsResultIsWhatCyReads(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is unavailable")
+	}
+	// The whole launcher contract in five lines of shell, which is the point of
+	// making it argv: the mailbox first, then the program and its arguments.
+	launcher := filepath.Join(t.TempDir(), "launcher.sh")
+	script := "#!/bin/sh\nmailbox=$1; shift\n\"$@\"\nprintf '{\"status\":\"completed\",\"exit_code\":42}\\n' > \"$mailbox/result.json\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewProcessManager(ProcessOptions{Root: t.TempDir(), Home: t.TempDir(), Sandbox: sandboxOff, Background: true, JobLauncher: launcher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	id := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "printf launched", Background: true}))
+	job := manager.get(id)
+	<-job.done
+	job.mu.Lock()
+	code := job.exitCode
+	job.mu.Unlock()
+	// The launcher's file says 42 where the program exited 0. Cy reporting 42
+	// is the only way to see that the file is what it read, rather than the
+	// wait status it happened to have as well.
+	if code == nil || *code != 42 {
+		t.Fatalf("exit code = %v, want the launcher's 42", code)
+	}
+	if output, _ := job.log.snapshot(64); !strings.Contains(string(output), "launched") {
+		t.Fatalf("job output = %q", output)
+	}
+}
+
 func TestBashCapsOutputWithoutBlockingProcess(t *testing.T) {
 	manager := processManagerForTest(t)
 	manager.logLimit = 64
@@ -289,7 +344,7 @@ func processManagerForTest(t *testing.T) *processManager {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is unavailable")
 	}
-	manager, err := NewProcessManager(t.TempDir(), t.TempDir(), sandboxOff, true)
+	manager, err := NewProcessManager(ProcessOptions{Root: t.TempDir(), Home: t.TempDir(), Sandbox: sandboxOff, Background: true})
 	if err != nil {
 		t.Fatal(err)
 	}

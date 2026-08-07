@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -57,7 +59,10 @@ const (
 
 type processManager struct {
 	workspace       *workspaceTools
+	home            string
 	toolHome        string
+	sessionID       string
+	jobLauncher     []string
 	logLimit        int64
 	sandbox         string
 	allowBackground bool
@@ -74,6 +79,7 @@ type processJob struct {
 
 	id             string
 	command        string
+	mailbox        string
 	cmd            *exec.Cmd
 	log            *jobBuffer
 	done           chan struct{}
@@ -110,12 +116,37 @@ type jobArgs struct {
 	TimeoutSeconds int    `json:"timeout,omitempty"`
 }
 
-func NewProcessManager(root, home, sandbox string, allowBackground bool) (*ProcessManager, error) {
-	workspace, err := newWorkspaceToolset(root)
+// ProcessOptions is everything a process manager has to be told before it runs
+// anything. A struct rather than a parameter list because most of these are
+// strings and would otherwise be distinguishable only by position.
+type ProcessOptions struct {
+	Root      string
+	Home      string
+	SessionID string
+	Sandbox   string
+	// Background says whether the model may ask for work that outlives its
+	// tool call.
+	Background bool
+	// JobLauncher is the program that supervises a job. Empty is the built-in
+	// supervisor, which is this binary re-exec'd; a configured one is how a job
+	// comes to run somewhere Cy knows nothing about.
+	JobLauncher string
+}
+
+func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
+	workspace, err := newWorkspaceToolset(opts.Root)
 	if err != nil {
 		return nil, err
 	}
-	toolHome := WorkspaceToolHome(home, workspace.root)
+	launcher := []string{opts.JobLauncher}
+	if opts.JobLauncher == "" {
+		self, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate the Cy binary to supervise jobs: %w", err)
+		}
+		launcher = []string{self, jobChildArg}
+	}
+	toolHome := WorkspaceToolHome(opts.Home, workspace.root)
 	if err := os.MkdirAll(toolHome, 0o700); err != nil {
 		return nil, fmt.Errorf("create tool home: %w", err)
 	}
@@ -127,12 +158,28 @@ func NewProcessManager(root, home, sandbox string, allowBackground bool) (*Proce
 	}
 	return &processManager{
 		workspace:       workspace,
+		home:            opts.Home,
 		toolHome:        toolHome,
+		sessionID:       opts.SessionID,
+		jobLauncher:     launcher,
 		logLimit:        defaultCommandLogLimit,
-		sandbox:         sandbox,
-		allowBackground: allowBackground,
+		sandbox:         opts.Sandbox,
+		allowBackground: opts.Background,
 		jobs:            make(map[string]*processJob),
 	}, nil
+}
+
+// jobsDir is where this session's supervisors report. Under the state home
+// rather than the tool home, which is the point rather than a detail: the tool
+// home is granted to the fenced child, so a job able to write its own mailbox
+// would be a job able to forge its own completion -- and what is behind the
+// fence is the record everything downstream believes.
+func (m *processManager) jobsDir() string {
+	return filepath.Join(m.home, "jobs", cmp.Or(m.sessionID, "no-session"))
+}
+
+func (m *processManager) mailboxFor(jobID string) string {
+	return filepath.Join(m.jobsDir(), jobID)
 }
 
 func (m *processManager) Status(jobID string) (ProcessResultMeta, bool) {
@@ -396,6 +443,20 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 	default:
 		return nil, fmt.Errorf("unknown process origin %d", origin)
 	}
+	// The user's own shell is not supervised. It bypasses the fence and the
+	// scrubbed environment already, it never becomes a managed job, and there
+	// is nobody to deliver its completion to but the person who typed it.
+	mailbox := ""
+	if origin == processOriginAgent {
+		if commandProcess.Err != nil {
+			return nil, fmt.Errorf("prepare bash: %w", commandProcess.Err)
+		}
+		mailbox = m.mailboxFor(id)
+		if err := os.MkdirAll(mailbox, 0o700); err != nil {
+			return nil, fmt.Errorf("create job mailbox: %w", err)
+		}
+		commandProcess = superviseCommand(m.jobLauncher, mailbox, commandProcess)
+	}
 	configureProcessGroup(commandProcess)
 	log := &jobBuffer{limit: m.logLimit}
 	commandProcess.Stdout = log
@@ -406,6 +467,7 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 	job := &processJob{
 		id:            id,
 		command:       command,
+		mailbox:       mailbox,
 		cmd:           commandProcess,
 		log:           log,
 		done:          make(chan struct{}),
@@ -463,6 +525,27 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 		job.status = jobCompleted
 		zero := 0
 		job.exitCode = &zero
+	}
+	// What the supervisor wrote down beats what this process observed. Today
+	// they agree, since this process forked the supervisor and waited on it.
+	// The read is here anyway so that the one path reporting a job's fate is
+	// the one that still works when the supervisor was forked by a Cy that has
+	// since exited -- and so that it is exercised on every job rather than only
+	// after a restart.
+	//
+	// Absent for a job killed hard: the supervisor dies with the group it
+	// leads, before it can write. That is why this overlays rather than
+	// replaces -- Cy's own account of a job it killed is the only one there is.
+	if result, ok := readJobResult(job.mailbox); ok {
+		if result.ExitCode != nil {
+			job.exitCode = result.ExitCode
+		}
+		if result.Error != "" {
+			job.errText = result.Error
+		}
+		if !result.FinishedAt.IsZero() {
+			job.finishedAt = result.FinishedAt
+		}
 	}
 	job.mu.Unlock()
 	close(job.done)
@@ -612,6 +695,9 @@ func (m *processManager) forget(job *processJob) {
 		delete(m.jobs, job.id)
 	}
 	m.mu.Unlock()
+	if job.mailbox != "" {
+		_ = os.RemoveAll(job.mailbox)
+	}
 }
 
 func (m *processManager) Close() error {
@@ -639,6 +725,10 @@ func (m *processManager) Close() error {
 			}
 		}
 	}
+	// Every job dies with Cy, so every mailbox in this session's tree is now
+	// about a job nobody will ever ask after. Removed wholesale rather than one
+	// at a time so that a mailbox whose job was lost track of goes too.
+	_ = os.RemoveAll(m.jobsDir())
 	return errors.Join(errs...)
 }
 

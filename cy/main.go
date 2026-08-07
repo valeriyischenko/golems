@@ -22,7 +22,7 @@ import (
 const maxPipedInputBytes = 8 * 1024 * 1024
 
 func main() {
-	if toolruntime.RunSandboxChildIfRequested() {
+	if toolruntime.RunSandboxChildIfRequested() || toolruntime.RunJobChildIfRequested() {
 		return
 	}
 	if err := runMain(); err != nil {
@@ -51,6 +51,7 @@ func runMain() (returnErr error) {
 	saveSession := flag.Bool("save-session", cfg.SaveSession, "keep a resumable session for a one-shot invocation")
 	jsonOutput := flag.Bool("json", cfg.JSON, "emit one versioned JSON result on stdout")
 	background := flag.String("background", os.Getenv("CY_BACKGROUND"), "let the model start background jobs: true or false (defaults to true outside a one-shot run)")
+	jobLauncher := flag.String("job-launcher", os.Getenv("CY_JOB_LAUNCHER"), "program that supervises each job, instead of the built-in supervisor")
 	profile := flag.String("profile", cfg.CapabilityProfile, "capability profile: full, edit, or read-only")
 	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "model command isolation: auto, off, or on")
 	theme := flag.String("theme", cfg.TerminalTheme, "terminal theme: auto, light, or dark")
@@ -93,6 +94,10 @@ func runMain() (returnErr error) {
 		return asConfigError(err)
 	}
 	cfg.Background, err = normalizeBackground(*background)
+	if err != nil {
+		return asConfigError(err)
+	}
+	cfg.JobLauncher, err = normalizeJobLauncher(*jobLauncher)
 	if err != nil {
 		return asConfigError(err)
 	}

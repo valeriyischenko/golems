@@ -161,6 +161,11 @@ type SessionSettings struct {
 	// and an omitted false would be indistinguishable from a build that did not
 	// know the setting existed.
 	BackgroundJobs bool `json:"background_jobs"`
+	// JobLauncher is the program each job was supervised by, when it was not
+	// the built-in supervisor. Between them these two say what a job could be
+	// and where it ran, which is the difference between two runs of the same
+	// command that behaved differently.
+	JobLauncher string `json:"job_launcher,omitempty"`
 }
 
 type ModelChanged struct {
