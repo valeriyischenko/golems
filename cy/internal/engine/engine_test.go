@@ -703,6 +703,11 @@ func TestEngineRecordsConfigurationAndEveryChangeToIt(t *testing.T) {
 	if first[0].SystemPrompt != "system" || len(first[0].InstructionPrompts) != 1 || first[0].InstructionPrompts[0] != "project rules" {
 		t.Fatalf("recorded prompts = %#v", first[0])
 	}
+	// The two Cy sends on its own account are recorded as they apply, so a run
+	// that configured neither still says which wording it used.
+	if first[0].CompactionPrompt != defaultCompactionSystemPrompt || first[0].ToolLimitPrompt != golem.DefaultToolLimitPrompt {
+		t.Fatalf("recorded internal prompts = %q, %q; want the built-ins", first[0].CompactionPrompt, first[0].ToolLimitPrompt)
+	}
 	if len(first[0].Tools) != 1 || first[0].Tools[0].Function.Name != "read" {
 		t.Fatalf("recorded tools = %#v", first[0].Tools)
 	}
@@ -991,7 +996,44 @@ func TestRunFinishedDoesNotClaimAFuseThatHeld(t *testing.T) {
 // only because the fuse blew. The trip path asks for a summary by sending the
 // tools with ToolChoice none rather than by withholding them, so that is what
 // this has to honour.
-type fuseModel struct{ mu sync.Mutex }
+// A configured prompt has to reach the model, not merely the journal: the
+// record is written from the same field, so asserting only the record would
+// pass on an engine that never passes it to the turn.
+func TestConfiguredToolLimitPromptIsSentAndRecorded(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tool := golem.FunctionToolWithEffect(golem.ToolEffectRead, "read", "read", jsonschema.Object(nil), func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+		return golem.ToolResult{Content: "contents"}, nil
+	})
+	const wrap = "Out of tool calls. Answer with what you have."
+	model := &fuseModel{}
+	engine, err := New(Config{
+		Model: model, Session: s, Tools: []golem.Tool{tool},
+		MaxToolIterations: 1, ToolLimitPrompt: wrap,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Stream(context.Background(), "keep going", nil); err != nil {
+		t.Fatal(err)
+	}
+	final := model.requests[len(model.requests)-1]
+	if last := final.Messages[len(final.Messages)-1]; last.Role != llm.RoleUser || last.Content != wrap {
+		t.Fatalf("final request last message = %#v, want the configured tool limit prompt", last)
+	}
+	configured := configurations(t, s)
+	if got := configured[len(configured)-1].ToolLimitPrompt; got != wrap {
+		t.Fatalf("recorded tool limit prompt = %q, want the configured one", got)
+	}
+}
+
+type fuseModel struct {
+	mu       sync.Mutex
+	requests []llm.Request
+}
 
 func (m *fuseModel) Chat(ctx context.Context, request llm.Request) (*llm.Response, error) {
 	return m.respond(request)
@@ -1008,6 +1050,7 @@ func (m *fuseModel) Stream(ctx context.Context, request llm.Request) (llm.Stream
 func (m *fuseModel) respond(request llm.Request) (*llm.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.requests = append(m.requests, request)
 	if request.ToolChoice != nil && request.ToolChoice.Mode == llm.ToolChoiceNone {
 		return &llm.Response{Content: "summary without tools", FinishReason: llm.FinishReasonStop}, nil
 	}

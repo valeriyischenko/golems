@@ -236,7 +236,7 @@ func (e *Engine) compactLocked(ctx context.Context, focus string, automatic bool
 	}
 	response, callErr := requester.Request(ctx, 0, llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: compactionSystemPrompt},
+			{Role: llm.RoleSystem, Content: e.compactionSystemPrompt},
 			{Role: llm.RoleUser, Content: prompt},
 		},
 		MaxTokens: &maxTokens,
@@ -268,7 +268,7 @@ func latestUserStart(messages []llm.Message, activeStart int) int {
 	return activeStart
 }
 
-const compactionSystemPrompt = `Summarize an older segment of a coding-agent session for reliable continuation. Preserve objective and acceptance criteria, user constraints, decisions and reasons, modified files and current state, commands/tests and results, errors and abandoned approaches, outstanding work/next step, and explicit uncertainty. Be compact but concrete. Do not claim work was done unless the transcript says it was.`
+const defaultCompactionSystemPrompt = `Summarize an older segment of a coding-agent session for reliable continuation. Preserve objective and acceptance criteria, user constraints, decisions and reasons, modified files and current state, commands/tests and results, errors and abandoned approaches, outstanding work/next step, and explicit uncertainty. Be compact but concrete. Do not claim work was done unless the transcript says it was.`
 
 const compactionToolArgumentsLimit = 4 * 1024
 

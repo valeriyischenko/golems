@@ -42,6 +42,9 @@ func runMain() (returnErr error) {
 	retryBudget := flag.String("retry-budget", os.Getenv("CY_RETRY_BUDGET"), "how long one model request may take in total, attempts included, e.g. 90s")
 	streamIdleTimeout := flag.String("stream-idle-timeout", os.Getenv("CY_STREAM_IDLE_TIMEOUT"), "how long a model stream may produce nothing before the attempt is abandoned")
 	systemPrompt := flag.String("system-prompt", cfg.SystemPrompt, "replace the built-in system prompt")
+	systemPromptFile := flag.String("system-prompt-file", os.Getenv("CY_SYSTEM_PROMPT_FILE"), "replace the built-in system prompt with the contents of a file")
+	compactionPromptFile := flag.String("compaction-prompt-file", os.Getenv("CY_COMPACTION_PROMPT_FILE"), "replace the built-in prompt a compaction summary is produced under")
+	toolLimitPromptFile := flag.String("tool-limit-prompt-file", os.Getenv("CY_TOOL_LIMIT_PROMPT_FILE"), "replace the built-in prompt asking for a final answer at the tool iteration limit")
 	rootDir := flag.String("root", cfg.RootDir, "workspace root for file and search tools")
 	home := flag.String("home", cfg.Home, "Cy home directory (defaults to CY_HOME or ~/.cy)")
 	verbose := flag.Bool("v", false, "show progress and usage in one-shot mode")
@@ -99,6 +102,23 @@ func runMain() (returnErr error) {
 	}
 	cfg.TerminalTheme, err = normalizeTerminalTheme(*theme)
 	if err != nil {
+		return asConfigError(err)
+	}
+	// Both name the same prompt and one of them would have to win silently,
+	// which is not a thing to guess at: a run given the wrong system prompt
+	// measures something other than what was asked for.
+	if strings.TrimSpace(*systemPromptFile) != "" {
+		if strings.TrimSpace(*systemPrompt) != "" {
+			return asConfigError(errors.New("set the system prompt with -system-prompt or -system-prompt-file, not both"))
+		}
+		if cfg.SystemPrompt, err = loadPromptFile(*systemPromptFile, "system prompt"); err != nil {
+			return asConfigError(err)
+		}
+	}
+	if cfg.CompactionPrompt, err = loadPromptFile(*compactionPromptFile, "compaction prompt"); err != nil {
+		return asConfigError(err)
+	}
+	if cfg.ToolLimitPrompt, err = loadPromptFile(*toolLimitPromptFile, "tool limit prompt"); err != nil {
 		return asConfigError(err)
 	}
 	// Before anything else reads the catalog, so a malformed declaration stops

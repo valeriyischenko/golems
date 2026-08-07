@@ -117,6 +117,9 @@ Flags override environment variables, which override saved defaults.
 | `--base-url` | `CY_BASE_URL` | Provider endpoint, for a self-hosted or proxied deployment |
 | `--context-window` | `CY_CONTEXT_WINDOW` | Context window in tokens, for a model Cy has no entry for |
 | `--system-prompt` | `CY_SYSTEM_PROMPT` | Replace the built-in system prompt |
+| `--system-prompt-file` | `CY_SYSTEM_PROMPT_FILE` | Replace it with the contents of a file |
+| `--compaction-prompt-file` | `CY_COMPACTION_PROMPT_FILE` | Replace the prompt a compaction summary is produced under |
+| `--tool-limit-prompt-file` | `CY_TOOL_LIMIT_PROMPT_FILE` | Replace the prompt asking for a final answer at the tool iteration limit |
 | `--root` | `CY_ROOT` | Workspace available to tools |
 | `--home` | `CY_HOME` | Credentials, sessions, and tool state |
 | `--profile` | `CY_PROFILE` | `full`, `edit`, or `read-only` |
@@ -129,6 +132,20 @@ background and falls back to the light palette when no answer is available.
 
 `--system-prompt` replaces the built-in prompt for the current invocation.
 Applicable `AGENTS.md` instructions are still loaded separately.
+
+The three `--*-prompt-file` flags take the wording of a prompt from a file
+instead of the binary. `--system-prompt-file` is the same setting as
+`--system-prompt` from another source, so setting both is an error rather than
+a precedence rule. The other two replace prompts Cy sends on its own account:
+the system message a compaction summary is produced under, and the message that
+asks for a final answer once `--max-tool-iterations` is spent.
+
+Every file is read at startup, so a run's prompts cannot change under it, and a
+path that is missing or empty stops the run before the first model call rather
+than midway through one. Leaving a flag unset is how to keep the built-in
+wording; naming a file never silently falls back to it. All three are recorded
+in `session_configured` as they apply, so a session file says what it ran under
+even when nothing was passed.
 
 `--base-url` points the chosen provider at a different OpenAI-compatible
 endpoint while keeping that provider's headers and authentication. Since the

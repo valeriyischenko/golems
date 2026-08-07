@@ -29,6 +29,12 @@ type Config struct {
 	RetryBudget       time.Duration
 	StreamIdleTimeout time.Duration
 	SystemPrompt      string
+	// CompactionPrompt and ToolLimitPrompt are the two prompts Cy sends on its
+	// own account rather than the user's: the one a compaction summary is
+	// produced under, and the one that asks for a final answer when the tool
+	// iteration fuse blows. Empty keeps the built-in wording.
+	CompactionPrompt  string
+	ToolLimitPrompt   string
 	RootDir           string
 	Home              string
 	Verbose           bool
@@ -42,10 +48,10 @@ type Config struct {
 	// record which ones they were.
 	ToolsFile     string
 	ExternalTools []toolruntime.ExternalTool
-	Security          SecurityState
-	PrintMode         bool
-	SaveSession       bool
-	Ephemeral         bool
+	Security      SecurityState
+	PrintMode     bool
+	SaveSession   bool
+	Ephemeral     bool
 }
 
 func LoadConfig() Config {
@@ -59,6 +65,35 @@ func LoadConfig() Config {
 		SandboxPolicy:     cmp.Or(strings.TrimSpace(os.Getenv("CY_SANDBOX")), defaultSandboxPolicy),
 		TerminalTheme:     cmp.Or(strings.TrimSpace(os.Getenv("CY_THEME")), defaultTerminalTheme),
 	}
+}
+
+// loadPromptFile reads a prompt whose text is configuration rather than code.
+// An unset path is not an error; it means the built-in wording stands.
+//
+// Read at startup rather than at the moment the prompt is used, which is the
+// whole reason this exists as a step of its own. A file consulted mid-run is a
+// prompt that can change under a session and leave nothing in the record to say
+// it did, and a path that is wrong should cost a configuration exit before the
+// first model call rather than a failure forty turns in -- the same bargain the
+// tool catalog is loaded under.
+//
+// An empty file is an error, not a way to ask for the built-in. Naming a file
+// and silently getting the default back is the failure this is meant to remove;
+// not naming one is how to keep it.
+func loadPromptFile(path, setting string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", setting, err)
+	}
+	prompt := strings.TrimSpace(string(content))
+	if prompt == "" {
+		return "", fmt.Errorf("%s file %s is empty", setting, path)
+	}
+	return prompt, nil
 }
 
 // externalToolsPath is where tool declarations are read from: CY_TOOLS when it

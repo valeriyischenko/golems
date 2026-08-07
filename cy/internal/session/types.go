@@ -79,11 +79,19 @@ type SandboxState struct {
 // verbatim, and a journal that disagreed with them would be describing a
 // different run.
 type SessionConfigured struct {
-	SystemPrompt       string          `json:"system_prompt"`
-	InstructionPrompts []string        `json:"instruction_prompts,omitempty"`
-	Tools              []llm.Tool      `json:"tools,omitempty"`
-	Sandbox            SandboxState    `json:"sandbox"`
-	Settings           SessionSettings `json:"settings"`
+	SystemPrompt       string   `json:"system_prompt"`
+	InstructionPrompts []string `json:"instruction_prompts,omitempty"`
+	// CompactionPrompt and ToolLimitPrompt are the two prompts Cy sends on its
+	// own account rather than the user's, recorded for the same reason as the
+	// system prompt and without omitempty for the same one: a reader should not
+	// have to know which build's built-in wording applied. The compaction prompt
+	// is the one that earns it -- it decides what a summary keeps, and that
+	// summary becomes the whole of the history behind it.
+	CompactionPrompt string          `json:"compaction_prompt"`
+	ToolLimitPrompt  string          `json:"tool_limit_prompt"`
+	Tools            []llm.Tool      `json:"tools,omitempty"`
+	Sandbox          SandboxState    `json:"sandbox"`
+	Settings         SessionSettings `json:"settings"`
 	// ExternalTools describes the ones among Tools that came from
 	// configuration. Same set, seen from the other side: Tools is what the
 	// model was shown, this is what those calls actually ran.

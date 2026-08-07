@@ -33,10 +33,15 @@ type Config struct {
 	ModelURI           string
 	SystemPrompt       string
 	InstructionPrompts []string
-	BaseURL            string
-	ContextWindow      int
-	ContextEstimated   bool
-	Tools              []golem.Tool
+	// CompactionPrompt and ToolLimitPrompt replace the built-in wording of the
+	// two prompts the engine sends on its own account rather than the user's.
+	// Empty keeps the built-in, so a caller with no opinion states none.
+	CompactionPrompt string
+	ToolLimitPrompt  string
+	BaseURL          string
+	ContextWindow    int
+	ContextEstimated bool
+	Tools            []golem.Tool
 	// ExternalTools describes the configured tools among Tools. The engine
 	// makes no use of it and does not derive it: it cannot, since a tool is a
 	// name and a function by the time it arrives here, and where that function
@@ -80,6 +85,8 @@ type Engine struct {
 	modelURI               string
 	systemPrompt           string
 	instructionPrompts     []string
+	compactionSystemPrompt string
+	toolLimitPrompt        string
 	tools                  []llm.Tool
 	externalTools          []session.ExternalToolConfig
 	toolSet                *golem.ToolSet
@@ -126,15 +133,19 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	engine := &Engine{
-		model:         cfg.Model,
-		session:       cfg.Session,
-		modelURI:      strings.TrimSpace(cfg.ModelURI),
-		systemPrompt:  systemPrompt,
-		tools:         toolSet.Definitions(),
-		externalTools: cfg.ExternalTools,
-		toolSet:       toolSet,
-		sandbox:       cfg.Sandbox,
-		requestPolicy: cfg.RequestPolicy,
+		model:        cfg.Model,
+		session:      cfg.Session,
+		modelURI:     strings.TrimSpace(cfg.ModelURI),
+		systemPrompt: systemPrompt,
+		// Resolved here rather than at the point of use, so that what is recorded
+		// is what will be sent and neither has to know the other's fallback.
+		compactionSystemPrompt: cmp.Or(strings.TrimSpace(cfg.CompactionPrompt), defaultCompactionSystemPrompt),
+		toolLimitPrompt:        cmp.Or(strings.TrimSpace(cfg.ToolLimitPrompt), golem.DefaultToolLimitPrompt),
+		tools:                  toolSet.Definitions(),
+		externalTools:          cfg.ExternalTools,
+		toolSet:                toolSet,
+		sandbox:                cfg.Sandbox,
+		requestPolicy:          cfg.RequestPolicy,
 		// Negative survives: golem reads it as unlimited. Only zero, which is
 		// "the caller did not say", becomes the default.
 		maxToolIterations:      cmp.Or(cfg.MaxToolIterations, defaultMaxToolIterationsPerTurn),
@@ -185,6 +196,8 @@ func (e *Engine) recordConfiguration() error {
 	configured := session.SessionConfigured{
 		SystemPrompt:       e.systemPrompt,
 		InstructionPrompts: e.instructionPrompts,
+		CompactionPrompt:   e.compactionSystemPrompt,
+		ToolLimitPrompt:    e.toolLimitPrompt,
 		Tools:              e.tools,
 		ExternalTools:      e.externalTools,
 		Sandbox:            e.sandbox,
@@ -469,6 +482,7 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 		Input:             input,
 		Tools:             e.toolSet,
 		MaxToolIterations: e.maxToolIterations,
+		ToolLimitPrompt:   e.toolLimitPrompt,
 		Stream:            true,
 		Emit:              emit,
 		Runtime:           runtime,

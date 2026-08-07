@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,33 @@ func TestNormalizeMaxToolIterations(t *testing.T) {
 	for _, input := range []string{"many", "0", "-1", "12 cycles"} {
 		if _, err := normalizeMaxToolIterations(input); err == nil {
 			t.Fatalf("normalizeMaxToolIterations(%q) accepted a value that is not a positive cycle count or unlimited", input)
+		}
+	}
+}
+
+func TestLoadPromptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "system.md")
+	if err := os.WriteFile(path, []byte("\nYou are an assistant.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadPromptFile(" "+path+" ", "system prompt")
+	if err != nil || got != "You are an assistant." {
+		t.Fatalf("loadPromptFile(%q) = %q, %v", path, got, err)
+	}
+	// Unset is the only way to ask for the built-in wording.
+	if got, err := loadPromptFile("  ", "system prompt"); err != nil || got != "" {
+		t.Fatalf("loadPromptFile(\"\") = %q, %v; want the built-in", got, err)
+	}
+	// A named file that is missing or blank is a configuration error, not a
+	// quiet fallback: a run given the wrong prompt measures something else.
+	blank := filepath.Join(dir, "blank.md")
+	if err := os.WriteFile(blank, []byte("\n\t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{filepath.Join(dir, "absent.md"), blank} {
+		if _, err := loadPromptFile(input, "system prompt"); err == nil {
+			t.Fatalf("loadPromptFile(%q) accepted a file that carries no prompt", input)
 		}
 	}
 }

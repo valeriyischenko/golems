@@ -232,6 +232,31 @@ func TestCompactionPromptIncludesToolCallNameAndArguments(t *testing.T) {
 	}
 }
 
+func TestConfiguredCompactionPromptIsSentAndRecorded(t *testing.T) {
+	s := contextSession(t)
+	appendCompletedTurn(t, s, "run-1", "old question", "old answer")
+	appendCompletedTurn(t, s, "run-2", "recent question", "recent answer")
+	model := &scriptedModel{chatResponses: []*llm.Response{{Content: "one line summary"}}}
+	const instead = "Summarize the transcript in one line."
+	eng, err := New(Config{Model: model, Session: s, ContextWindow: 32 * 1024, CompactionPrompt: instead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := eng.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 1 {
+		t.Fatalf("compaction requests = %d, want 1", len(model.requests))
+	}
+	if system := model.requests[0].Messages[0]; system.Role != llm.RoleSystem || system.Content != instead {
+		t.Fatalf("compaction system message = %#v, want the configured prompt", system)
+	}
+	configured := configurations(t, s)
+	if got := configured[len(configured)-1].CompactionPrompt; got != instead {
+		t.Fatalf("recorded compaction prompt = %q, want the configured one", got)
+	}
+}
+
 func TestCompactionRejectsTruncatedSummary(t *testing.T) {
 	s := contextSession(t)
 	appendCompletedTurn(t, s, "run-1", "old question", "old answer")
