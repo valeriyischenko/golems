@@ -1,0 +1,307 @@
+package tools
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/levmv/golems/pkg/golem"
+	"github.com/levmv/golems/pkg/llm"
+)
+
+const echoArgumentsTool = `{
+  "tools": [
+    {
+      "name": "book_search",
+      "description": "Search the text. One line per hit.",
+      "effect": "read",
+      "command": ["python3", "tools/book_search.py"],
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "timeout": 120,
+      "workdir": ".",
+      "env": {"PYTHONHASHSEED": "0"}
+    }
+  ]
+}`
+
+func TestLoadExternalToolsReadsADeclaration(t *testing.T) {
+	declarations := loadExternalToolsForTest(t, echoArgumentsTool)
+	if len(declarations) != 1 {
+		t.Fatalf("declarations = %d", len(declarations))
+	}
+	declaration := declarations[0]
+	if declaration.Name != "book_search" || declaration.Effect != "read" {
+		t.Fatalf("declaration = %+v", declaration)
+	}
+	if len(declaration.Command) != 2 || declaration.Command[0] != "python3" {
+		t.Fatalf("command = %q", declaration.Command)
+	}
+	// The parameters block is verbatim JSON Schema, so it has to survive the
+	// trip into the type a tool definition already wants.
+	if declaration.Parameters.Properties["query"].Type != "string" {
+		t.Fatalf("parameters = %+v", declaration.Parameters)
+	}
+	if declaration.timeout() != 120*time.Second {
+		t.Fatalf("timeout = %s", declaration.timeout())
+	}
+}
+
+// No tool file is the ordinary case and not a failure. A file that is there
+// and wrong is the opposite: it means someone declared tools this run will not
+// have, and running anyway hides that.
+func TestLoadExternalToolsAcceptsAMissingFile(t *testing.T) {
+	declarations, err := LoadExternalTools(filepath.Join(t.TempDir(), "absent.json"))
+	if err != nil || declarations != nil {
+		t.Fatalf("declarations = %v, err = %v", declarations, err)
+	}
+}
+
+func TestLoadExternalToolsRejectsBadDeclarations(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  string
+		message string
+	}{
+		{"not json", `{`, "parse tool config"},
+		{"unknown field", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"colour":"red"}]}`, "colour"},
+		{"missing effect", `{"tools":[{"name":"t","description":"d","command":["x"]}]}`, "effect"},
+		{"unknown effect", `{"tools":[{"name":"t","description":"d","effect":"readonly","command":["x"]}]}`, "effect"},
+		{"no description", `{"tools":[{"name":"t","description":"  ","effect":"read","command":["x"]}]}`, "description"},
+		{"no command", `{"tools":[{"name":"t","description":"d","effect":"read","command":[]}]}`, "command"},
+		{"bad name", `{"tools":[{"name":"book search","description":"d","effect":"read","command":["x"]}]}`, "name"},
+		{"duplicate name", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"]},{"name":"t","description":"d","effect":"read","command":["y"]}]}`, "twice"},
+		{"scalar parameters", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"parameters":{"type":"string"}}]}`, "object"},
+		{"negative timeout", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"timeout":-1}]}`, "timeout"},
+		{"absolute workdir", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"workdir":"/etc"}]}`, "workdir"},
+		{"overrides HOME", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"HOME":"/root"}}]}`, "HOME"},
+		{"reserved env", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"CY_INTERNAL_SANDBOX_POLICY":"off"}}]}`, "reserved"},
+		// Reserved rather than unknown: the key is part of the format now, so
+		// a config written for background tools fails loudly instead of
+		// quietly running in the foreground.
+		{"background", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":true}]}`, "background"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := writeToolConfigForTest(t, testCase.config)
+			_, err := LoadExternalTools(path)
+			if err == nil {
+				t.Fatal("bad configuration was accepted")
+			}
+			if !strings.Contains(err.Error(), testCase.message) {
+				t.Fatalf("error = %v, want it to mention %q", err, testCase.message)
+			}
+		})
+	}
+}
+
+// A program named but not present is a mistake in configuration, and it has to
+// be found before the model is told the tool exists rather than fifty turns
+// into an unattended run.
+func TestExternalToolsRefuseAProgramThatIsNotThere(t *testing.T) {
+	manager := processManagerForTest(t)
+	_, err := manager.ExternalTools([]ExternalTool{{
+		Name: "missing", Description: "d", Effect: "read",
+		Command: []string{"cy-no-such-program-anywhere"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "not on PATH") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestExternalToolPassesArgumentsOnStdinAndReturnsStdout(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `cat; printf 'ignored\n' >&2`, ExternalTool{Effect: "read"})
+	result := runExternalToolForTest(t, tool, `{"query":"schelling","limit":3}`)
+	if result.Content != `{"query":"schelling","limit":3}` {
+		t.Fatalf("content = %q", result.Content)
+	}
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok {
+		t.Fatalf("meta = %T", result.Meta)
+	}
+	if meta.ExitCode == nil || *meta.ExitCode != 0 || meta.Tool != "probe" {
+		t.Fatalf("meta = %+v", meta)
+	}
+}
+
+// A tool that ran and failed is a result the model can act on, not a tool
+// error, and it needs stderr to act on it.
+func TestExternalToolReportsANonZeroExitToTheModel(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `printf 'partial\n'; printf 'no such book\n' >&2; exit 4`, ExternalTool{Effect: "read"})
+	result := runExternalToolForTest(t, tool, `{}`)
+	for _, want := range []string{"exited 4", "partial", "no such book"} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("content = %q, want it to mention %q", result.Content, want)
+		}
+	}
+}
+
+// The environment is the fence's, plus what configuration adds, and never the
+// supervisor's -- a tool has no business reading Cy's provider credentials.
+func TestExternalToolGetsTheFencedEnvironment(t *testing.T) {
+	manager := processManagerForTest(t)
+	t.Setenv("CY_TEST_SECRET", "must-not-leak")
+	tool := externalToolForTest(t, manager, `env`, ExternalTool{Effect: "read", Env: map[string]string{"PYTHONHASHSEED": "0"}})
+	result := runExternalToolForTest(t, tool, `{}`)
+	if strings.Contains(result.Content, "must-not-leak") {
+		t.Fatalf("supervisor environment leaked: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "PYTHONHASHSEED=0") {
+		t.Fatalf("declared environment missing: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "HOME="+manager.toolHome) {
+		t.Fatalf("HOME is not the tool home: %q", result.Content)
+	}
+}
+
+func TestExternalToolIsKilledWhenItOutlivesItsTimeout(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `sleep 30`, ExternalTool{Effect: "read", Timeout: 1})
+	started := time.Now()
+	result := runExternalToolForTest(t, tool, `{}`)
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("timeout did not fire: %s", elapsed)
+	}
+	if !strings.Contains(result.Content, "timed out") {
+		t.Fatalf("content = %q", result.Content)
+	}
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok || !meta.TimedOut {
+		t.Fatalf("meta = %+v", result.Meta)
+	}
+}
+
+// Preflight catches the ordinary case, so this is the one it cannot: a program
+// that was there when the catalog was built and is gone by the time it is
+// called. The model cannot call its way around that, so the run ends.
+func TestExternalToolThatCannotStartEndsTheRun(t *testing.T) {
+	manager := processManagerForTest(t)
+	script := filepath.Join(t.TempDir(), "vanishing.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := manager.ExternalTools([]ExternalTool{{
+		Name: "vanishing", Description: "d", Effect: "read", Command: []string{script},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tools[0].Run(context.Background(), llm.ToolCall{Function: llm.ToolFunction{Arguments: "{}"}})
+	if !errors.Is(err, golem.ErrToolFatal) {
+		t.Fatalf("err = %v, want it to be fatal", err)
+	}
+}
+
+func TestExternalToolRejectsArgumentsThatAreNotOneObject(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `cat`, ExternalTool{Effect: "read"})
+	for _, arguments := range []string{`{"a":1} {"b":2}`, `[1,2]`, `not json`} {
+		if _, err := tool.Run(context.Background(), llm.ToolCall{Function: llm.ToolFunction{Arguments: arguments}}); err == nil {
+			t.Fatalf("arguments %q were accepted", arguments)
+		}
+	}
+}
+
+func TestExternalToolCarriesItsDeclaredEffect(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `true`, ExternalTool{Effect: "write"})
+	if tool.Effect != golem.ToolEffectWrite {
+		t.Fatalf("effect = %q", tool.Effect)
+	}
+	if kept := FilterForProfile([]golem.Tool{tool}, "read-only"); len(kept) != 0 {
+		t.Fatal("a tool declared write survived the read-only profile")
+	}
+}
+
+// runFencedExternalProbe runs a shell script as an external tool with the
+// fence on, and returns what the model would read. The workspace and home are
+// arguments because the platforms disagree about which directories a test may
+// use as a workspace at all.
+func runFencedExternalProbe(t *testing.T, workspace, home, script string) string {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	manager, err := NewProcessManager(workspace, home, sandboxOn, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	declaration := ExternalTool{
+		Name: "probe", Description: "test probe", Effect: "read",
+		Command: []string{bash, "-c", script},
+	}
+	if err := declaration.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := manager.ExternalTools([]ExternalTool{declaration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runExternalToolForTest(t, tools[0], "{}").Content
+}
+
+func loadExternalToolsForTest(t *testing.T, config string) []ExternalTool {
+	t.Helper()
+	declarations, err := LoadExternalTools(writeToolConfigForTest(t, config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return declarations
+}
+
+func writeToolConfigForTest(t *testing.T, config string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tools.json")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// externalToolForTest declares a tool that runs a shell script, which is the
+// shortest way to write a program that does something specific with the JSON
+// it is handed. Real tools are named directly; nothing here depends on the
+// difference.
+func externalToolForTest(t *testing.T, manager *processManager, script string, declaration ExternalTool) golem.Tool {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	declaration.Name = "probe"
+	declaration.Description = "test probe"
+	declaration.Command = []string{bash, "-c", script}
+	if err := declaration.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	tools, buildErr := manager.ExternalTools([]ExternalTool{declaration})
+	if buildErr != nil {
+		t.Fatal(buildErr)
+	}
+	return tools[0]
+}
+
+func runExternalToolForTest(t *testing.T, tool golem.Tool, arguments string) golem.ToolResult {
+	t.Helper()
+	result, err := tool.Run(context.Background(), llm.ToolCall{Function: llm.ToolFunction{Arguments: arguments}})
+	if err != nil {
+		t.Fatalf("tool error = %v", err)
+	}
+	return result
+}

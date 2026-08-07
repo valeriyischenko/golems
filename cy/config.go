@@ -4,9 +4,12 @@ import (
 	"cmp"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	toolruntime "github.com/levmv/golems/cy/internal/tools"
 )
 
 const (
@@ -33,6 +36,12 @@ type Config struct {
 	CapabilityProfile string
 	SandboxPolicy     string
 	TerminalTheme     string
+	// ToolsFile and ExternalTools are the declared tool catalog: where it was
+	// read from, and what it said. Read once at startup rather than per call,
+	// so every turn of a session offers the same tools and the session can
+	// record which ones they were.
+	ToolsFile     string
+	ExternalTools []toolruntime.ExternalTool
 	Security          SecurityState
 	PrintMode         bool
 	SaveSession       bool
@@ -50,6 +59,16 @@ func LoadConfig() Config {
 		SandboxPolicy:     cmp.Or(strings.TrimSpace(os.Getenv("CY_SANDBOX")), defaultSandboxPolicy),
 		TerminalTheme:     cmp.Or(strings.TrimSpace(os.Getenv("CY_THEME")), defaultTerminalTheme),
 	}
+}
+
+// externalToolsPath is where tool declarations are read from: CY_TOOLS when it
+// is set, so a run can be given a catalog of its own without moving Cy's home,
+// and otherwise a file beside the rest of Cy's state.
+func externalToolsPath(home string) string {
+	if path := strings.TrimSpace(os.Getenv("CY_TOOLS")); path != "" {
+		return path
+	}
+	return filepath.Join(resolveStateHome(home), "tools.json")
 }
 
 // normalizeContextWindow reads an explicit context window in tokens. It is

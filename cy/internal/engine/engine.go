@@ -488,13 +488,21 @@ func (e *Engine) deliverQueuedInput(runID string) error {
 func (e *Engine) toolExecutionHooks(runID string) golem.ToolExecutionHooks {
 	return golem.ToolExecutionHooks{
 		After: func(execution golem.ToolExecution) error {
-			_, err := e.session.Append(session.RecordToolResult, session.ToolResult{
+			if _, err := e.session.Append(session.RecordToolResult, session.ToolResult{
 				RunID:      runID,
 				ToolCallID: execution.Call.ID,
 				Content:    execution.Message.Content,
 				Meta:       execution.Result.Meta,
-			})
-			return err
+			}); err != nil {
+				return err
+			}
+			// A tool that could not be started is not something the model can
+			// call its way around, so the run ends rather than handing it back
+			// as advice. Recorded first, so the journal says what happened.
+			if errors.Is(execution.Err, golem.ErrToolFatal) {
+				return execution.Err
+			}
+			return nil
 		},
 	}
 }

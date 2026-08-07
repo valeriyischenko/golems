@@ -117,6 +117,29 @@ func TestSandboxedCommandHonoursTheProcessName(t *testing.T) {
 	}
 }
 
+// A tool declared in configuration is fenced exactly as Bash is. Without that,
+// a program Cy spawns inherits Cy's own reach -- every path Cy can touch, Cy's
+// home and the journal included -- and the record the harness exists to
+// produce is the thing behind the fence, not the provider key.
+func TestExternalToolIsFencedLikeBash(t *testing.T) {
+	outside, err := os.CreateTemp("", "cy-outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
+	if _, err := outside.WriteString("supervisor-only\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := outside.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content := runFencedExternalProbe(t, t.TempDir(), t.TempDir(),
+		"cat "+shellQuoteForTest(outside.Name())+" 2>&1")
+	if strings.Contains(content, "supervisor-only") {
+		t.Fatalf("external tool read outside the workspace: %q", content)
+	}
+}
+
 func TestSandboxedBashNestedWorkdirCanAccessWorkspace(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "nested")

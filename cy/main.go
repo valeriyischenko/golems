@@ -101,6 +101,13 @@ func runMain() (returnErr error) {
 	if err != nil {
 		return asConfigError(err)
 	}
+	// Before anything else reads the catalog, so a malformed declaration stops
+	// the run here rather than after a model call has already been paid for.
+	cfg.ToolsFile = externalToolsPath(cfg.Home)
+	cfg.ExternalTools, err = toolruntime.LoadExternalTools(cfg.ToolsFile)
+	if err != nil {
+		return asConfigError(err)
+	}
 	store, err := state.Open(cfg.Home)
 	if err != nil {
 		return fmt.Errorf("initialize state: %w", err)

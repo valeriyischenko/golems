@@ -14,6 +14,15 @@ import (
 
 type ToolFunc func(ctx context.Context, call llm.ToolCall) (ToolResult, error)
 
+// ErrToolFatal marks a tool failure that calling again cannot fix: the tool
+// could not be started at all, so every retry fails the same way. An ordinary
+// tool error is handed to the model to work around, which is right when the
+// tool ran and disagreed with its arguments and wrong when it never ran -- an
+// unattended chain will spend the rest of its budget being resourceful about a
+// mistake in configuration. A runtime that watches tool outcomes stops the run
+// on this; the result is still recorded first, so what happened is on file.
+var ErrToolFatal = errors.New("tool cannot run")
+
 type ToolResult struct {
 	Content string
 	Meta    any

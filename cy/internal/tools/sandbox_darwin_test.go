@@ -111,6 +111,41 @@ func TestSeatbeltRunsAProgramWithoutAShell(t *testing.T) {
 	}
 }
 
+// A tool declared in configuration is fenced exactly as Bash is. Without that,
+// a program Cy spawns inherits Cy's own reach -- every path Cy can touch, Cy's
+// home and the journal included -- and the record the harness exists to
+// produce is the thing behind the fence, not the provider key.
+func TestExternalToolIsFencedLikeBash(t *testing.T) {
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := os.MkdirTemp(userHome, ".cy-external-workspace-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	home, err := os.MkdirTemp(userHome, ".cy-external-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	outsideDir, err := os.MkdirTemp(userHome, ".cy-external-outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	outside := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("supervisor-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := runFencedExternalProbe(t, workspace, home,
+		"cat "+shellQuoteForTest(outside)+" 2>&1")
+	if strings.Contains(content, "supervisor-only") {
+		t.Fatalf("external tool read outside the workspace: %q", content)
+	}
+}
+
 func TestSeatbeltProfileKeepsNetworkOpen(t *testing.T) {
 	if !strings.Contains(seatbeltProfile, "(allow network*)") {
 		t.Fatal("seatbelt profile does not keep network open")

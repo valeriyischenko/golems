@@ -60,6 +60,12 @@ func exitCodeFor(err error) int {
 	if errors.Is(err, llm.ErrInvalidRequest) {
 		return exitConfig
 	}
+	// A tool that cannot be started is a mistake in the tool configuration --
+	// a program that is not there, or not executable. Rerunning unchanged
+	// fails the same way, which is what this code means.
+	if errors.Is(err, golem.ErrToolFatal) {
+		return exitConfig
+	}
 	var providerErr *llm.Error
 	if errors.As(err, &providerErr) {
 		return exitProvider

@@ -466,12 +466,44 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 	}
 	if processes != nil {
 		tools = append(tools, processes.Tools()...)
+		external, err := a.externalTools(processes, tools)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, external...)
 	}
 	tools = toolruntime.FilterForProfile(tools, profile)
 	if _, err := golem.NewToolSet(tools); err != nil {
 		return nil, err
 	}
 	return tools, nil
+}
+
+// externalTools builds the tools declared in configuration, refusing any name
+// a built-in already uses. Shadowing would be silent in the worst way: the
+// model is shown one name and reaches whichever tool the catalog kept.
+//
+// Checked against the whole built-in catalog rather than against what this
+// profile exposes, so a declaration is not accepted under one profile and
+// rejected under another.
+func (a *sessionAgent) externalTools(processes *toolruntime.ProcessManager, assembled []golem.Tool) ([]golem.Tool, error) {
+	if len(a.cfg.ExternalTools) == 0 {
+		return nil, nil
+	}
+	taken := make(map[string]bool, len(assembled)+len(a.baseTools))
+	for _, tool := range append(append([]golem.Tool(nil), a.baseTools...), assembled...) {
+		taken[tool.Definition.Function.Name] = true
+	}
+	for _, declaration := range a.cfg.ExternalTools {
+		if taken[declaration.Name] {
+			return nil, asConfigError(fmt.Errorf("tool %q in %s is already a built-in tool; give it another name", declaration.Name, a.cfg.ToolsFile))
+		}
+	}
+	external, err := processes.ExternalTools(a.cfg.ExternalTools)
+	if err != nil {
+		return nil, asConfigError(fmt.Errorf("%s: %w", a.cfg.ToolsFile, err))
+	}
+	return external, nil
 }
 
 func (a *sessionAgent) webFetchBackends(hnClient *hackernews.Client) ([]webfetch.Backend, error) {
