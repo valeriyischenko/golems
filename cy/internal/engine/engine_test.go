@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -1079,4 +1080,97 @@ func TestEngineRecordsAFallbackContextWindowAsEstimated(t *testing.T) {
 	if settings.ContextWindow <= 0 || !settings.ContextWindowEstimated {
 		t.Fatalf("settings = %#v, want a positive estimated window", settings)
 	}
+}
+
+// The source stops offering an event once it is acknowledged, so the order
+// matters: acknowledge first and a failure to journal loses the completion
+// entirely, and the model is never told the job finished. The hook asserts the
+// record is already in the file at the moment it is asked to consume the event.
+func TestEngineAcknowledgesABoundaryEventOnlyAfterJournalingIt(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	model := &scriptedModel{chatResponses: []*llm.Response{{Content: "noted"}, {Content: "noted again"}}}
+	pending := map[string]string{"job-1": "job one finished", "job-2": "job two finished"}
+	acknowledged := 0
+	eng, err := New(Config{
+		Model:   model,
+		Session: s,
+		BoundaryEvents: func(string) ([]BoundaryEvent, error) {
+			events := make([]BoundaryEvent, 0, len(pending))
+			for _, id := range []string{"job-1", "job-2"} {
+				if content, ok := pending[id]; ok {
+					events = append(events, BoundaryEvent{JobID: id, Content: content})
+				}
+			}
+			return events, nil
+		},
+		BoundaryEventDelivered: func(jobID string) error {
+			if !journaledBoundaryEvent(t, s, jobID) {
+				return fmt.Errorf("asked to consume %s before it was journaled", jobID)
+			}
+			delete(pending, jobID)
+			acknowledged++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Stream(context.Background(), "start", nil); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged != 2 || len(pending) != 0 {
+		t.Fatalf("acknowledged = %d, still pending = %d, want both consumed", acknowledged, len(pending))
+	}
+
+	// Second turn: consumed means consumed. An event told twice reads to the
+	// model as a job that finished twice.
+	if _, err := eng.Stream(context.Background(), "again", nil); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged != 2 {
+		t.Fatalf("acknowledged after a second turn = %d, want 2", acknowledged)
+	}
+	if journaled := countBoundaryEvents(t, s); journaled != 2 {
+		t.Fatalf("boundary_event records = %d, want 2", journaled)
+	}
+}
+
+func journaledBoundaryEvent(t *testing.T, s *session.Session, jobID string) bool {
+	t.Helper()
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Type != session.RecordBoundaryEvent {
+			continue
+		}
+		payload, err := session.DecodePayload[session.BoundaryEvent](record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload.JobID == jobID {
+			return true
+		}
+	}
+	return false
+}
+
+func countBoundaryEvents(t *testing.T, s *session.Session) int {
+	t.Helper()
+	records, err := s.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, record := range records {
+		if record.Type == session.RecordBoundaryEvent {
+			count++
+		}
+	}
+	return count
 }

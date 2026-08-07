@@ -264,3 +264,53 @@ func jobIDFromText(t *testing.T, text string) string {
 	}
 	return match[1]
 }
+
+// Peeking must not consume. Between the peek and the acknowledgement is the
+// caller writing the event somewhere durable, and that is the part that can
+// fail; a completion consumed by a failed delivery is one the model is never
+// told about.
+func TestPendingCompletionEventsRepeatUntilAcknowledged(t *testing.T) {
+	manager := processManagerForTest(t)
+	started := runProcessTool(t, manager.bash, bashArgs{Command: "exit 0", Background: true})
+	id := jobIDFromText(t, started)
+	job := manager.get(id)
+	select {
+	case <-job.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("background job did not finish")
+	}
+
+	first, err := manager.PendingCompletionEvents("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].JobID != id {
+		t.Fatalf("pending = %#v, want the finished job", first)
+	}
+	again, err := manager.PendingCompletionEvents("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 1 {
+		t.Fatalf("pending after an unacknowledged peek = %d, want it still offered", len(again))
+	}
+
+	if err := manager.MarkCompletionDelivered(id); err != nil {
+		t.Fatal(err)
+	}
+	after, err := manager.PendingCompletionEvents("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("pending after acknowledgement = %#v, want none", after)
+	}
+	// A job that was never offered, or was acknowledged twice, is not an error:
+	// the caller is asserting an outcome, not asking for one.
+	if err := manager.MarkCompletionDelivered(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.MarkCompletionDelivered("job-nonexistent"); err != nil {
+		t.Fatal(err)
+	}
+}

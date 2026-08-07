@@ -400,9 +400,17 @@ type CompletionEvent struct {
 	Content string
 }
 
-// DeliverCompletionEvents reports unobserved background completions once for
-// the lifetime of this Cy process. Nothing is persisted across restarts.
-func (m *processManager) DeliverCompletionEvents(_ string) ([]CompletionEvent, error) {
+// PendingCompletionEvents reports background completions nobody has been told
+// about yet. It does not mark them told: the caller does that with
+// MarkCompletionDelivered, once the event is somewhere that survives this
+// function returning. Peeking and acknowledging are separate because between
+// them is the part that can fail, and a completion consumed by a failed
+// delivery is one the model never hears about at all.
+//
+// Once for the lifetime of this Cy process. Nothing is persisted across
+// restarts, so a job that finishes while Cy is stopped is still lost -- that
+// needs the on-disk job registry, not this.
+func (m *processManager) PendingCompletionEvents(_ string) ([]CompletionEvent, error) {
 	m.mu.Lock()
 	jobs := make([]*processJob, 0, len(m.jobs))
 	for _, job := range m.jobs {
@@ -411,14 +419,13 @@ func (m *processManager) DeliverCompletionEvents(_ string) ([]CompletionEvent, e
 	m.mu.Unlock()
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].startedAt.Before(jobs[j].startedAt) })
 
-	var delivered []CompletionEvent
+	var pending []CompletionEvent
 	for _, job := range jobs {
 		job.mu.Lock()
 		if job.status == jobRunning || job.completionSeen {
 			job.mu.Unlock()
 			continue
 		}
-		job.completionSeen = true
 		status := job.status
 		exitCode := job.exitCode
 		errText := job.errText
@@ -432,9 +439,24 @@ func (m *processManager) DeliverCompletionEvents(_ string) ([]CompletionEvent, e
 			content += ", error=" + errText
 		}
 		content += ". Inspect output with job(action=\"output\", job_id=\"" + id + "\")."
-		delivered = append(delivered, CompletionEvent{JobID: id, Content: content})
+		pending = append(pending, CompletionEvent{JobID: id, Content: content})
 	}
-	return delivered, nil
+	return pending, nil
+}
+
+// MarkCompletionDelivered records that a job's completion has been told to the
+// model and must not be told again. Acknowledging a job that is unknown or
+// already acknowledged is not an error: the caller is asserting an outcome, not
+// asking for one.
+func (m *processManager) MarkCompletionDelivered(id string) error {
+	job := m.get(id)
+	if job == nil {
+		return nil
+	}
+	job.mu.Lock()
+	job.completionSeen = true
+	job.mu.Unlock()
+	return nil
 }
 
 func (m *processManager) markCompletionSeen(job *processJob) {

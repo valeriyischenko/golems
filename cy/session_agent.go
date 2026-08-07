@@ -519,20 +519,21 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 	}
 	spec := resolveModelSpecFor(cfg, cfg.ModelURI, a.state, false)
 	eng, err := engine.New(engine.Config{
-		Model:              model,
-		Session:            journal,
-		ModelURI:           cfg.ModelURI,
-		SystemPrompt:       cfg.SystemPrompt,
-		InstructionPrompts: instructionPrompts,
-		BaseURL:            cfg.BaseURL,
-		ContextWindow:      spec.ContextWindow,
-		ContextEstimated:   spec.Estimated,
-		Tools:              tools,
-		Sandbox:            cfg.Security.Journal(cfg.SandboxPolicy),
-		MaxToolIterations:  cfg.MaxToolIterations,
-		RequestPolicy:      requestPolicyFor(cfg),
-		BoundaryEvents:     boundaryEventsFrom(processes),
-		Sanitize:           a.masker.Redact,
+		Model:                  model,
+		Session:                journal,
+		ModelURI:               cfg.ModelURI,
+		SystemPrompt:           cfg.SystemPrompt,
+		InstructionPrompts:     instructionPrompts,
+		BaseURL:                cfg.BaseURL,
+		ContextWindow:          spec.ContextWindow,
+		ContextEstimated:       spec.Estimated,
+		Tools:                  tools,
+		Sandbox:                cfg.Security.Journal(cfg.SandboxPolicy),
+		MaxToolIterations:      cfg.MaxToolIterations,
+		RequestPolicy:          requestPolicyFor(cfg),
+		BoundaryEvents:         boundaryEventsFrom(processes),
+		BoundaryEventDelivered: processes.MarkCompletionDelivered,
+		Sanitize:               a.masker.Redact,
 	})
 	if err != nil {
 		_ = processes.Close()
@@ -574,7 +575,7 @@ func requestPolicyFor(cfg Config) golem.RequestPolicy {
 // is allowed to know about both.
 func boundaryEventsFrom(processes *toolruntime.ProcessManager) func(string) ([]engine.BoundaryEvent, error) {
 	return func(runID string) ([]engine.BoundaryEvent, error) {
-		completions, err := processes.DeliverCompletionEvents(runID)
+		completions, err := processes.PendingCompletionEvents(runID)
 		if err != nil {
 			return nil, err
 		}

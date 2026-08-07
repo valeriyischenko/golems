@@ -43,8 +43,15 @@ type Config struct {
 	// that has said so deliberately should ask for.
 	MaxToolIterations int
 	RequestPolicy     golem.RequestPolicy
-	BoundaryEvents    func(runID string) ([]BoundaryEvent, error)
-	Sanitize          func(string) string
+	// BoundaryEvents reports what is waiting to be told to the model, without
+	// consuming it. BoundaryEventDelivered consumes one, and is called only after
+	// that event is in the journal. Two hooks rather than one because the engine
+	// has work to do between the two -- the queued input goes into the context
+	// first -- and because a source that consumed on read would lose an event to
+	// any failure in between.
+	BoundaryEvents         func(runID string) ([]BoundaryEvent, error)
+	BoundaryEventDelivered func(jobID string) error
+	Sanitize               func(string) string
 }
 
 // BoundaryEvent is something that happened outside the conversation and has to
@@ -60,21 +67,22 @@ type BoundaryEvent struct {
 // history and usage are replayed from it instead of being committed to a second
 // in-memory transcript at the end of a turn.
 type Engine struct {
-	turnMu             sync.Mutex
-	queueMu            sync.Mutex
-	pendingInputs      []string
-	model              golem.Model
-	session            *session.Session
-	modelURI           string
-	systemPrompt       string
-	instructionPrompts []string
-	tools              []llm.Tool
-	toolSet            *golem.ToolSet
-	sandbox            session.SandboxState
-	maxToolIterations  int
-	requestPolicy      golem.RequestPolicy
-	boundaryEvents     func(runID string) ([]BoundaryEvent, error)
-	sanitize           func(string) string
+	turnMu                 sync.Mutex
+	queueMu                sync.Mutex
+	pendingInputs          []string
+	model                  golem.Model
+	session                *session.Session
+	modelURI               string
+	systemPrompt           string
+	instructionPrompts     []string
+	tools                  []llm.Tool
+	toolSet                *golem.ToolSet
+	sandbox                session.SandboxState
+	maxToolIterations      int
+	requestPolicy          golem.RequestPolicy
+	boundaryEvents         func(runID string) ([]BoundaryEvent, error)
+	boundaryEventDelivered func(jobID string) error
+	sanitize               func(string) string
 	// recordedConfig is the last configuration written to the journal, or what a
 	// resume found there, in the encoding it was recorded in. Held rather than
 	// replayed because a replay rebuilds the entire conversation to answer one
@@ -122,12 +130,13 @@ func New(cfg Config) (*Engine, error) {
 		requestPolicy: cfg.RequestPolicy,
 		// Negative survives: golem reads it as unlimited. Only zero, which is
 		// "the caller did not say", becomes the default.
-		maxToolIterations: cmp.Or(cfg.MaxToolIterations, defaultMaxToolIterationsPerTurn),
-		boundaryEvents:    cfg.BoundaryEvents,
-		sanitize:          sanitize,
-		baseURL:           strings.TrimSpace(cfg.BaseURL),
-		contextWindow:     cfg.ContextWindow,
-		contextEstimated:  cfg.ContextEstimated,
+		maxToolIterations:      cmp.Or(cfg.MaxToolIterations, defaultMaxToolIterationsPerTurn),
+		boundaryEvents:         cfg.BoundaryEvents,
+		boundaryEventDelivered: cfg.BoundaryEventDelivered,
+		sanitize:               sanitize,
+		baseURL:                strings.TrimSpace(cfg.BaseURL),
+		contextWindow:          cfg.ContextWindow,
+		contextEstimated:       cfg.ContextEstimated,
 	}
 	if engine.contextWindow <= 0 {
 		engine.contextWindow = 32 * 1024
@@ -394,6 +403,14 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 			// Redacted going in. The text is the only message content Cy masks,
 			// and a credential the model never saw does not belong in the file
 			// that outlives the run either.
+			//
+			// Acknowledged one at a time, immediately after each append. The
+			// source stops offering an event once it is acknowledged, so an
+			// acknowledgement that runs ahead of the append it stands for turns
+			// a failure here into a completion the model is never told about.
+			// Acknowledging per event rather than once at the end means a
+			// failure part way through leaves the rest still pending for the
+			// next boundary, and repeats none of the ones already written.
 			for _, event := range boundary {
 				if _, err := e.session.Append(session.RecordBoundaryEvent, session.BoundaryEvent{
 					RunID:   runID,
@@ -401,6 +418,11 @@ func (e *Engine) Stream(ctx context.Context, input string, emit golem.StreamFunc
 					Content: e.sanitize(event.Content),
 				}); err != nil {
 					return nil, err
+				}
+				if e.boundaryEventDelivered != nil {
+					if err := e.boundaryEventDelivered(event.JobID); err != nil {
+						return nil, err
+					}
 				}
 			}
 			messages, _, err := e.prepareContext(ctx)
