@@ -131,6 +131,12 @@ type ProcessOptions struct {
 	// supervisor, which is this binary re-exec'd; a configured one is how a job
 	// comes to run somewhere Cy knows nothing about.
 	JobLauncher string
+	// Delivered are the jobs whose completion the model has already been told
+	// about, as the journal has it. Only the journal knows: the registry says a
+	// job finished, and a mailbox left behind by a run that stopped between
+	// telling the model and tidying up looks exactly like one that finished
+	// unheard.
+	Delivered map[string]struct{}
 }
 
 func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
@@ -156,7 +162,7 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 	if err := os.MkdirAll(WorkspaceToolTemp(toolHome), 0o700); err != nil {
 		return nil, fmt.Errorf("create tool temp: %w", err)
 	}
-	return &processManager{
+	manager := &processManager{
 		workspace:       workspace,
 		home:            opts.Home,
 		toolHome:        toolHome,
@@ -166,7 +172,74 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 		sandbox:         opts.Sandbox,
 		allowBackground: opts.Background,
 		jobs:            make(map[string]*processJob),
-	}, nil
+	}
+	manager.adoptMailboxes(opts.Delivered)
+	return manager, nil
+}
+
+// adoptMailboxes takes over the jobs an earlier run of this session left in the
+// registry. A job with a result is a finished job, and becomes an ordinary
+// entry here: the model can be told it ended, and can read its output, exactly
+// as if this process had started it.
+//
+// A job without one is a job whose supervisor never got to write, which today
+// can only mean it died with the run that started it -- nothing yet outlives
+// Cy. Its mailbox is removed. C10f is what gives a job the right to be still
+// running here, and it is that commit's business to tell the two apart.
+//
+// Best effort throughout. An unreadable registry costs the run its outstanding
+// completions, which is bad, but refusing to start costs it everything.
+func (m *processManager) adoptMailboxes(delivered map[string]struct{}) {
+	entries, err := os.ReadDir(m.jobsDir())
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		mailbox := m.mailboxFor(id)
+		result, ok := readJobResult(mailbox)
+		if !ok {
+			_ = os.RemoveAll(mailbox)
+			continue
+		}
+		job := &processJob{
+			id:             id,
+			command:        readJobCommand(mailbox),
+			mailbox:        mailbox,
+			log:            &jobBuffer{limit: m.logLimit},
+			done:           closedChannel(),
+			status:         cmp.Or(result.Status, jobCompleted),
+			exitCode:       result.ExitCode,
+			errText:        result.Error,
+			startedAt:      result.StartedAt,
+			finishedAt:     result.FinishedAt,
+			completionSeen: contains(delivered, id),
+		}
+		if tail, ok := readJobOutput(mailbox); ok {
+			job.log.adopt(tail, result.OutputBytes)
+		}
+		// Already reported, and only the tidying was missed. Nothing here needs
+		// it any more, so finish what the last run started.
+		if job.completionSeen {
+			_ = os.RemoveAll(mailbox)
+			continue
+		}
+		m.jobs[id] = job
+	}
+}
+
+func closedChannel() chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func contains(set map[string]struct{}, key string) bool {
+	_, ok := set[key]
+	return ok
 }
 
 // jobsDir is where this session's supervisors report. Under the state home
@@ -455,6 +528,10 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 		if err := os.MkdirAll(mailbox, 0o700); err != nil {
 			return nil, fmt.Errorf("create job mailbox: %w", err)
 		}
+		// Cy's own note in the mailbox, not the supervisor's: what the model
+		// asked for, rather than the argv that came of it. Without it a job
+		// picked up by a later run can be listed only as an id.
+		_ = writeJobFile(mailbox, jobCommandFile, []byte(command))
 		commandProcess = superviseCommand(m.jobLauncher, mailbox, commandProcess)
 	}
 	configureProcessGroup(commandProcess)
@@ -571,9 +648,9 @@ type CompletionEvent struct {
 // them is the part that can fail, and a completion consumed by a failed
 // delivery is one the model never hears about at all.
 //
-// Once for the lifetime of this Cy process. Nothing is persisted across
-// restarts, so a job that finishes while Cy is stopped is still lost -- that
-// needs the on-disk job registry, not this.
+// Once per completion, across restarts as well as within a run: a job the last
+// run left unreported was adopted from the registry at startup and is offered
+// here like any other.
 func (m *processManager) PendingCompletionEvents(_ string) ([]CompletionEvent, error) {
 	m.mu.Lock()
 	jobs := make([]*processJob, 0, len(m.jobs))
@@ -613,6 +690,16 @@ func (m *processManager) PendingCompletionEvents(_ string) ([]CompletionEvent, e
 // model and must not be told again. Acknowledging a job that is unknown or
 // already acknowledged is not an error: the caller is asserting an outcome, not
 // asking for one.
+//
+// The mailbox goes with it, because a mailbox is what makes a completion
+// outstanding. The caller only reaches here once the boundary event is in the
+// journal, so the two disagree in one direction only: a crash in between leaves
+// a mailbox for a job the model was already told about, and the journal is what
+// settles that on the next start.
+//
+// The output is not removed with it. It stays in this process's cache, so
+// job(action="output") still answers for the rest of the run -- which is the
+// point at which the model is most likely to ask.
 func (m *processManager) MarkCompletionDelivered(id string) error {
 	job := m.get(id)
 	if job == nil {
@@ -620,7 +707,11 @@ func (m *processManager) MarkCompletionDelivered(id string) error {
 	}
 	job.mu.Lock()
 	job.completionSeen = true
+	mailbox := job.mailbox
 	job.mu.Unlock()
+	if mailbox != "" {
+		_ = os.RemoveAll(mailbox)
+	}
 	return nil
 }
 
@@ -721,17 +812,29 @@ func (m *processManager) Close() error {
 	for _, job := range jobs {
 		job.mu.Lock()
 		running := job.status == jobRunning
+		mailbox := job.mailbox
 		job.mu.Unlock()
 		if running {
 			if _, err := m.stop(ctx, job.id, "cy exiting"); err != nil {
 				errs = append(errs, err)
 			}
 		}
+		// Every job dies with Cy, so the only thing worth leaving behind is a
+		// completion nobody has been told about: work that finished on its own
+		// between the last boundary and now, and would otherwise fall in the gap
+		// between the run that saw it end and the run that could have said so.
+		// A job killed just above is not that -- its work is dead and a future
+		// run has nothing to report about it.
+		job.mu.Lock()
+		outstanding := !running && !job.completionSeen
+		job.mu.Unlock()
+		if !outstanding && mailbox != "" {
+			_ = os.RemoveAll(mailbox)
+		}
 	}
-	// Every job dies with Cy, so every mailbox in this session's tree is now
-	// about a job nobody will ever ask after. Removed wholesale rather than one
-	// at a time so that a mailbox whose job was lost track of goes too.
-	_ = os.RemoveAll(m.jobsDir())
+	// Removes the session's directory when it is empty, which is the whole of
+	// the common case, and leaves it alone when a completion is still waiting.
+	_ = os.Remove(m.jobsDir())
 	return errors.Join(errs...)
 }
 

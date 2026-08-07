@@ -564,6 +564,11 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 	if err != nil {
 		return nil, nil, fmt.Errorf("load project instructions: %w", err)
 	}
+	// Replayed before the manager exists, because the manager has to know which
+	// of the completions it is about to find on disk have already been told.
+	// A failure here is not fatal: it costs the run its outstanding completions,
+	// and the journal itself is checked properly further along.
+	replayed, _ := journal.Replay()
 	processes, err := toolruntime.NewProcessManager(toolruntime.ProcessOptions{
 		Root:        a.root,
 		Home:        resolveStateHome(cfg.Home),
@@ -571,6 +576,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		Sandbox:     runtimeSandboxPolicy(cfg),
 		Background:  cfg.BackgroundJobs(),
 		JobLauncher: cfg.JobLauncher,
+		Delivered:   replayed.DeliveredJobs,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize process runtime: %w", err)

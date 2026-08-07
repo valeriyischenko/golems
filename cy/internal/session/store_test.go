@@ -313,6 +313,44 @@ func TestReplayAcceptsRunFinishedWithoutOutcome(t *testing.T) {
 	}
 }
 
+// The journal is the only durable record that a completion was told. A registry
+// entry on disk says a job finished; whether anyone heard is here.
+func TestReplayCollectsTheJobsAlreadyReported(t *testing.T) {
+	s, err := Create(CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events := []BoundaryEvent{
+		{RunID: "run-1", JobID: "job-a", Content: "job-a finished"},
+		{RunID: "run-1", Content: "something with no job behind it"},
+		{RunID: "run-2", JobID: "job-b", Content: "job-b finished"},
+	}
+	for _, event := range events {
+		if _, err := s.Append(RecordBoundaryEvent, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(state.DeliveredJobs) != 2 {
+		t.Fatalf("delivered = %#v, want job-a and job-b", state.DeliveredJobs)
+	}
+	for _, id := range []string{"job-a", "job-b"} {
+		if _, ok := state.DeliveredJobs[id]; !ok {
+			t.Fatalf("%s missing from %#v", id, state.DeliveredJobs)
+		}
+	}
+	// Cloned, or the caller of a cached replay could add to the cache.
+	state.DeliveredJobs["job-c"] = struct{}{}
+	again, err := s.Replay()
+	if err != nil || len(again.DeliveredJobs) != 2 {
+		t.Fatalf("delivered = %#v err = %v, want the cache untouched", again.DeliveredJobs, err)
+	}
+}
+
 func TestClosePruningEmptyKeepsUsedSession(t *testing.T) {
 	home := t.TempDir()
 	empty, err := Create(CreateOptions{Home: home, Workspace: "/workspace"})

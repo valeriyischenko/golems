@@ -329,6 +329,100 @@ func TestTheOutputCyReportsIsTheSupervisorsFileNotThePipeItAlsoHeld(t *testing.T
 	}
 }
 
+// The stop this is about is an ordinary one: Cy exits after a job has finished
+// but before the next turn boundary, which is the only place a completion is
+// ever told. Nothing about the job outlives the run -- only its mailbox does.
+func TestACompletionOutlivesTheRunThatNeverGotToReportIt(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	first := managerForSession(t, home, root, nil)
+	id := jobIDFromText(t, runProcessTool(t, first.bash, bashArgs{Command: "printf 'work done'", Background: true}))
+	<-first.get(id).done
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := managerForSession(t, home, root, nil)
+	pending, err := second.PendingCompletionEvents("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].JobID != id || pending[0].FinishedAt.IsZero() {
+		t.Fatalf("pending = %#v, want the unreported job", pending)
+	}
+	// Adopted as a whole job, not just as a notification: the model is told it
+	// finished and can then ask what it printed.
+	if output := runProcessTool(t, second.job, jobArgs{Action: "output", JobID: id}); !strings.Contains(output, "work done") {
+		t.Fatalf("output = %q", output)
+	}
+	if listed := runProcessTool(t, second.job, jobArgs{Action: "list"}); !strings.Contains(listed, "printf 'work done'") {
+		t.Fatalf("list = %q", listed)
+	}
+}
+
+func TestACompletionIsNotToldTwiceAcrossAStop(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	first := managerForSession(t, home, root, nil)
+	id := jobIDFromText(t, runProcessTool(t, first.bash, bashArgs{Command: "printf 'work done'", Background: true}))
+	<-first.get(id).done
+	if err := first.MarkCompletionDelivered(id); err != nil {
+		t.Fatal(err)
+	}
+	// Acknowledging removes the mailbox, so put it back: this is the crash
+	// window between journalling the delivery and tidying up after it, and the
+	// journal is the only thing that can settle it.
+	if err := os.MkdirAll(first.mailboxFor(id), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJobResult(first.mailboxFor(id), jobResult{Status: jobCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+
+	second := managerForSession(t, home, root, map[string]struct{}{id: {}})
+	pending, err := second.PendingCompletionEvents("run")
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending = %#v err = %v, want nothing to report", pending, err)
+	}
+	if _, err := os.Stat(second.mailboxFor(id)); !os.IsNotExist(err) {
+		t.Fatalf("mailbox still at %s: %v", second.mailboxFor(id), err)
+	}
+}
+
+func TestAJobKilledOnTheWayOutHasNothingToReportLater(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	first := managerForSession(t, home, root, nil)
+	runProcessTool(t, first.bash, bashArgs{Command: "sleep 30", Background: true})
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(home, "jobs")); err == nil && len(entries) != 0 {
+		t.Fatalf("registry still holds %d sessions", len(entries))
+	}
+
+	second := managerForSession(t, home, root, nil)
+	if pending, err := second.PendingCompletionEvents("run"); err != nil || len(pending) != 0 {
+		t.Fatalf("pending = %#v err = %v, want nothing", pending, err)
+	}
+}
+
+// managerForSession builds managers that share a state home and a session id,
+// which is what makes the second one a resume of the first.
+func managerForSession(t *testing.T, home, root string, delivered map[string]struct{}) *processManager {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	manager, err := NewProcessManager(ProcessOptions{
+		Root: root, Home: home, SessionID: "session", Sandbox: sandboxOff,
+		Background: true, Delivered: delivered,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
+}
+
 func TestBashCapsOutputWithoutBlockingProcess(t *testing.T) {
 	manager := processManagerForTest(t)
 	manager.logLimit = 64

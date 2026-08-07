@@ -15,8 +15,9 @@ import (
 const jobChildArg = "__cy_job_run"
 
 const (
-	jobResultFile = "result.json"
-	jobOutputFile = "output"
+	jobResultFile  = "result.json"
+	jobOutputFile  = "output"
+	jobCommandFile = "command"
 )
 
 // jobResult is a job's fate as a file: written by the supervisor, read by
@@ -158,6 +159,16 @@ func readJobResult(mailbox string) (jobResult, bool) {
 		return jobResult{}, false
 	}
 	return result, true
+}
+
+// readJobCommand reports what the job was asked to run, or a stand-in when the
+// note is missing, so that a list of jobs is readable either way.
+func readJobCommand(mailbox string) string {
+	raw, err := os.ReadFile(filepath.Join(mailbox, jobCommandFile))
+	if err != nil || len(raw) == 0 {
+		return "(command not recorded)"
+	}
+	return string(raw)
 }
 
 // readJobOutput reports the tail the supervisor kept. Only ever present next to

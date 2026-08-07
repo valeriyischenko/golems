@@ -30,7 +30,12 @@ type State struct {
 	CompactionCount int
 	ActiveRuns      map[string]struct{}
 	PendingTools    []PendingTool
-	LastSeq         uint64
+	// DeliveredJobs are the jobs whose completion the model has already been
+	// told about. A completion is delivered exactly once, and the only durable
+	// record that it was is the boundary event; a job registry on disk can say
+	// a job finished but not whether anyone heard.
+	DeliveredJobs map[string]struct{}
+	LastSeq       uint64
 }
 
 func (s *Session) Replay() (State, error) {
@@ -68,6 +73,9 @@ func (s *Session) Replay() (State, error) {
 func applyRecord(state *State, record Record) error {
 	if state.ActiveRuns == nil {
 		state.ActiveRuns = make(map[string]struct{})
+	}
+	if state.DeliveredJobs == nil {
+		state.DeliveredJobs = make(map[string]struct{})
 	}
 	switch record.Type {
 	case RecordSessionStarted:
@@ -181,6 +189,9 @@ func applyRecord(state *State, record Record) error {
 		state.Messages = append(state.Messages, llm.Message{Role: llm.RoleSystem, Content: payload.Content, CreatedAt: record.Timestamp})
 		state.MessageSeqs = append(state.MessageSeqs, record.Seq)
 		state.MessageRunIDs = append(state.MessageRunIDs, payload.RunID)
+		if payload.JobID != "" {
+			state.DeliveredJobs[payload.JobID] = struct{}{}
+		}
 	case RecordCompactionCompleted:
 		payload, err := DecodePayload[CompactionCompleted](record)
 		if err != nil {
@@ -232,6 +243,10 @@ func cloneState(state State) State {
 	cloned.ActiveRuns = make(map[string]struct{}, len(state.ActiveRuns))
 	for runID := range state.ActiveRuns {
 		cloned.ActiveRuns[runID] = struct{}{}
+	}
+	cloned.DeliveredJobs = make(map[string]struct{}, len(state.DeliveredJobs))
+	for jobID := range state.DeliveredJobs {
+		cloned.DeliveredJobs[jobID] = struct{}{}
 	}
 	cloned.PendingTools = append([]PendingTool(nil), state.PendingTools...)
 	return cloned
