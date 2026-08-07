@@ -28,6 +28,8 @@ const (
 	maxJobReadBytes        = 256 * 1024
 	jobStopTimeout         = 3 * time.Second
 	jobKillRetryInterval   = 20 * time.Millisecond
+	defaultJobWait         = time.Minute
+	maxCommandSummary      = 120
 )
 
 const (
@@ -71,6 +73,7 @@ type processJob struct {
 	mu sync.Mutex
 
 	id             string
+	command        string
 	cmd            *exec.Cmd
 	log            *jobBuffer
 	done           chan struct{}
@@ -102,8 +105,9 @@ type bashArgs struct {
 }
 
 type jobArgs struct {
-	Action string `json:"action"`
-	JobID  string `json:"job_id,omitempty"`
+	Action         string `json:"action"`
+	JobID          string `json:"job_id,omitempty"`
+	TimeoutSeconds int    `json:"timeout,omitempty"`
 }
 
 func NewProcessManager(root, home, sandbox string, allowBackground bool) (*ProcessManager, error) {
@@ -171,10 +175,11 @@ func (m *processManager) Tools() []golem.Tool {
 		golem.FunctionToolWithEffect(
 			golem.ToolEffectProcess,
 			"job",
-			"Inspect or stop a managed Bash process. Actions: output, stop.",
+			"Inspect, wait for, or stop managed Bash processes. Actions: list, output, wait, stop.",
 			jsonschema.Obj(
-				jsonschema.Required("action", jsonschema.Str{Description: "One of: output, stop."}),
-				jsonschema.Required("job_id", jsonschema.Str{Description: "Job id returned by Bash."}),
+				jsonschema.Required("action", jsonschema.Str{Description: "One of: list, output, wait, stop."}),
+				jsonschema.Optional("job_id", jsonschema.Str{Description: "Job id returned by Bash. Required by every action except list."}),
+				jsonschema.Optional("timeout", jsonschema.Int{Description: "For wait: seconds to block before returning whatever the job's state is by then. Defaults to 60; capped at 3600.", Minimum: new(1), Maximum: new(3600)}),
 			).NoAdditionalProperties(),
 			m.job,
 		),
@@ -272,12 +277,21 @@ func (m *processManager) job(ctx context.Context, call llm.ToolCall) (golem.Tool
 	if err := decodeToolArgs(call, &args); err != nil {
 		return golem.ToolResult{}, err
 	}
+	action := strings.ToLower(strings.TrimSpace(args.Action))
+	if action == "list" {
+		return golem.ToolResult{Content: m.listJobs()}, nil
+	}
 	job := m.get(args.JobID)
 	if job == nil {
 		return golem.ToolResult{}, fmt.Errorf("job %q not found", args.JobID)
 	}
-	switch strings.ToLower(strings.TrimSpace(args.Action)) {
-	case "output":
+	switch action {
+	case "output", "wait":
+		if action == "wait" {
+			if err := m.await(ctx, job, args.TimeoutSeconds); err != nil {
+				return golem.ToolResult{}, err
+			}
+		}
 		content, truncated := job.log.snapshot(maxJobReadBytes)
 		m.markCompletionSeen(job)
 		return golem.ToolResult{Content: m.formatJob(job, content, true, true, truncated), Meta: m.processMeta(job, true)}, nil
@@ -290,8 +304,69 @@ func (m *processManager) job(ctx context.Context, call llm.ToolCall) (golem.Tool
 		content, truncated := job.log.snapshot(defaultCommandPreview)
 		return golem.ToolResult{Content: m.formatJob(job, content, true, true, truncated), Meta: m.processMeta(job, true)}, nil
 	default:
-		return golem.ToolResult{}, errors.New("action must be one of: output, stop")
+		return golem.ToolResult{}, errors.New("action must be one of: list, output, wait, stop")
 	}
+}
+
+// await blocks until the job ends or the bound expires. An expired bound is a
+// result rather than an error -- the caller asked to wait a while, and "still
+// running" answers that -- but it is always a bound: a wait can be configured
+// and can never be unlimited. Capped at the longest a job may live, so
+// a caller cannot ask to wait past the point where there is anything to wait
+// for.
+func (m *processManager) await(ctx context.Context, job *processJob, seconds int) error {
+	wait := defaultJobWait
+	if seconds > 0 {
+		wait = min(time.Duration(seconds)*time.Second, maxBashTimeout)
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-job.done:
+	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// listJobs answers "what did I start, and how does it stand" -- the half of
+// visibility that ids handed back one at a time do not give, and the thing that
+// makes choosing to wait possible at all.
+func (m *processManager) listJobs() string {
+	m.mu.Lock()
+	jobs := make([]*processJob, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		jobs = append(jobs, job)
+	}
+	m.mu.Unlock()
+	if len(jobs) == 0 {
+		return "no managed jobs\n"
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].startedAt.Before(jobs[j].startedAt) })
+	var out strings.Builder
+	for _, job := range jobs {
+		job.mu.Lock()
+		fmt.Fprintf(&out, "%s %s %s", job.id, job.status, jobDuration(job.startedAt, job.finishedAt).Truncate(time.Second))
+		if job.exitCode != nil {
+			fmt.Fprintf(&out, " exit_code=%d", *job.exitCode)
+		}
+		fmt.Fprintf(&out, " %s\n", summarizeCommand(job.command))
+		job.mu.Unlock()
+	}
+	return out.String()
+}
+
+// summarizeCommand cuts a command down to one line that fits beside a job id.
+func summarizeCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if line, _, found := strings.Cut(command, "\n"); found {
+		command = strings.TrimSpace(line) + " ..."
+	}
+	if runes := []rune(command); len(runes) > maxCommandSummary {
+		command = strings.TrimSpace(string(runes[:maxCommandSummary])) + "..."
+	}
+	return command
 }
 
 func (m *processManager) start(command, workdir string, timeout time.Duration, origin processOrigin) (*processJob, error) {
@@ -330,6 +405,7 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 	}
 	job := &processJob{
 		id:            id,
+		command:       command,
 		cmd:           commandProcess,
 		log:           log,
 		done:          make(chan struct{}),
@@ -584,7 +660,7 @@ func (m *processManager) formatJob(job *processJob, output []byte, includeOutput
 		out.WriteString("truncated: true\n")
 	}
 	if status == jobRunning {
-		out.WriteString("continue: job(action=\"output\", job_id=\"" + job.id + "\")\n")
+		out.WriteString("continue: job(action=\"wait\"|\"output\"|\"stop\", job_id=\"" + job.id + "\")\n")
 	}
 	if includeOutput {
 		out.WriteByte('\n')

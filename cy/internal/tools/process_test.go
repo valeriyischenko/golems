@@ -167,6 +167,62 @@ func TestBackgroundJobCanBeReadAndStopped(t *testing.T) {
 	}
 }
 
+func TestJobListReportsEveryManagedJobAndWhatItRan(t *testing.T) {
+	manager := processManagerForTest(t)
+	// No job_id, and that is not an error: list is the one action that asks
+	// about all of them.
+	if empty := runProcessTool(t, manager.job, jobArgs{Action: "list"}); !strings.Contains(empty, "no managed jobs") {
+		t.Fatalf("empty list = %q", empty)
+	}
+	running := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "sleep 30 # the long one", Background: true}))
+	finished := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "printf done # the short one", Background: true}))
+	<-manager.get(finished).done
+
+	list := runProcessTool(t, manager.job, jobArgs{Action: "list"})
+	// The command, not only the id: an agent cannot choose which job to wait on
+	// from a column of opaque identifiers.
+	for _, want := range []string{running + " running", finished + " completed", "exit_code=0", "the long one", "the short one"} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("list is missing %q: %q", want, list)
+		}
+	}
+	if strings.Index(list, running) > strings.Index(list, finished) {
+		t.Fatalf("list is not in start order: %q", list)
+	}
+}
+
+func TestJobWaitReturnsOnCompletionAndOnAnExpiredBound(t *testing.T) {
+	manager := processManagerForTest(t)
+	short := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "sleep 0.2; printf finally", Background: true}))
+	done := runProcessTool(t, manager.job, jobArgs{Action: "wait", JobID: short})
+	if !strings.Contains(done, "status: completed") || !strings.Contains(done, "finally") {
+		t.Fatalf("wait on a short job = %q", done)
+	}
+	// Waiting counts as being told. A completion the model has just read must
+	// not arrive a second time as a boundary event.
+	pending, err := manager.PendingCompletionEvents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range pending {
+		if event.JobID == short {
+			t.Fatalf("wait left the completion pending delivery: %+v", event)
+		}
+	}
+
+	long := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "sleep 30", Background: true}))
+	started := time.Now()
+	// An expired bound is a result rather than an error: "still running" is a
+	// legitimate answer to "wait a second".
+	stillRunning := runProcessTool(t, manager.job, jobArgs{Action: "wait", JobID: long, TimeoutSeconds: 1})
+	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 10*time.Second {
+		t.Fatalf("bounded wait took %s", elapsed)
+	}
+	if !strings.Contains(stillRunning, "status: running") {
+		t.Fatalf("wait on a long job = %q", stillRunning)
+	}
+}
+
 func TestBashCapsOutputWithoutBlockingProcess(t *testing.T) {
 	manager := processManagerForTest(t)
 	manager.logLimit = 64
