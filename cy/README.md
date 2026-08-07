@@ -61,7 +61,7 @@ the session context:
 | 0 | Success |
 | 1 | Failure that does not fit the classes below |
 | 2 | Invocation or configuration: a bad flag or setting, a missing credential, a required sandbox that is unavailable. Rerunning unchanged will fail the same way |
-| 3 | The provider rejected or could not serve the request |
+| 3 | The provider rejected the request, could not serve it, or stopped answering mid-stream |
 | 130 | Interrupted |
 
 The class is decided by the kind of failure, not by matching its message, so

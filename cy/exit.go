@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/llm"
 )
 
@@ -61,6 +62,15 @@ func exitCodeFor(err error) int {
 	}
 	var providerErr *llm.Error
 	if errors.As(err, &providerErr) {
+		return exitProvider
+	}
+	// A stalled stream is the provider not answering, in the shape that matters
+	// most to an unattended caller: the endpoint accepted the connection and then
+	// produced nothing. It is raised above the provider layer, so it carries no
+	// *llm.Error and would otherwise read as an unclassified failure -- the
+	// opposite classification from a refused connection, for the same dead
+	// endpoint.
+	if errors.Is(err, golem.ErrStreamIdle) {
 		return exitProvider
 	}
 	return exitFailure

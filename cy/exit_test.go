@@ -6,8 +6,21 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/llm"
 )
+
+// One dead endpoint, two shapes. A refused connection arrives as a provider
+// error; a connection that is accepted and then goes quiet is raised above the
+// provider layer and carries none. They must not be classified oppositely,
+// because a caller acts on the class and the difference is not its business.
+func TestExitCodeForTreatsARefusedAndAStalledEndpointAlike(t *testing.T) {
+	refused := &llm.Error{Provider: "openai", Message: "dial tcp: connection refused"}
+	stalled := fmt.Errorf("%w after 5m0s", golem.ErrStreamIdle)
+	if exitCodeFor(refused) != exitCodeFor(stalled) {
+		t.Fatalf("refused = %d, stalled = %d", exitCodeFor(refused), exitCodeFor(stalled))
+	}
+}
 
 func TestExitCodeForClassifiesFailures(t *testing.T) {
 	for _, tt := range []struct {
@@ -22,6 +35,7 @@ func TestExitCodeForClassifiesFailures(t *testing.T) {
 		{"invalid request", fmt.Errorf("build: %w", llm.ErrInvalidRequest), exitConfig},
 		{"provider", &llm.Error{StatusCode: 503, Provider: "openai", Message: "unavailable"}, exitProvider},
 		{"provider wrapped", fmt.Errorf("turn failed: %w", &llm.Error{StatusCode: 500, Provider: "openai"}), exitProvider},
+		{"stalled stream", fmt.Errorf("%w after 5m0s", golem.ErrStreamIdle), exitProvider},
 		{"interrupted", fmt.Errorf("run: %w", context.Canceled), exitInterrupted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
