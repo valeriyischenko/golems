@@ -498,6 +498,38 @@ func TestRunTurnToolLoopLimitForcesFinalReply(t *testing.T) {
 	}
 }
 
+func TestToolLimitPromptIsConfigurable(t *testing.T) {
+	call := llm.ToolCall{ID: "call_1", Function: llm.ToolFunction{Name: "echo", Arguments: `{}`}}
+	model := &fakeModel{
+		chatResponses: []*llm.Response{
+			{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
+			{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
+			{Content: "done", FinishReason: llm.FinishReasonStop},
+		},
+	}
+	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
+		return ToolResult{Content: call.Function.Arguments}, nil
+	})
+	tools, err := NewToolSet([]Tool{tool})
+	if err != nil {
+		t.Fatalf("NewToolSet() error = %v", err)
+	}
+
+	const wrap = "Out of tool calls. Answer now."
+	if _, err := RunTurn(context.Background(), TurnConfig{
+		Model: model, Tools: tools, Input: "loop", MaxToolIterations: 1, ToolLimitPrompt: wrap,
+	}); err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("requests len = %d, want 3", len(model.requests))
+	}
+	last := model.requests[2].Messages[len(model.requests[2].Messages)-1]
+	if last.Role != llm.RoleUser || last.Content != wrap {
+		t.Fatalf("final request last message = %#v, want the configured prompt", last)
+	}
+}
+
 func TestEmptyInput(t *testing.T) {
 	agent, err := New(Config{Model: &fakeModel{}})
 	if err != nil {

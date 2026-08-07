@@ -1,6 +1,7 @@
 package golem
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,10 @@ import (
 	"github.com/levmv/golems/pkg/llm"
 )
 
-const toolLimitFinalPrompt = "Tool call limit reached. Do not call any more tools; answer with what you have, and be explicit about anything you could not verify."
+// DefaultToolLimitPrompt asks for a final answer once MaxToolIterations is
+// spent. Exported rather than merely overridable because a caller that replaces
+// it still has to be able to say what the turn actually ran under.
+const DefaultToolLimitPrompt = "Tool call limit reached. Do not call any more tools; answer with what you have, and be explicit about anything you could not verify."
 
 type ModelRequestFunc func(ctx context.Context, step int, request llm.Request, stream bool, emit StreamFunc) (*llm.Response, error)
 
@@ -40,9 +44,12 @@ type TurnConfig struct {
 	ToolChoice        *llm.ToolChoice
 	ParallelToolCalls *bool
 	MaxToolIterations int
-	Stream            bool
-	Emit              StreamFunc
-	Runtime           TurnRuntime
+	// ToolLimitPrompt replaces DefaultToolLimitPrompt. Empty keeps it, so a
+	// caller with no opinion states none.
+	ToolLimitPrompt string
+	Stream          bool
+	Emit            StreamFunc
+	Runtime         TurnRuntime
 }
 
 // RunTurn executes the provider-independent model/tool loop. Callers serialize
@@ -61,6 +68,7 @@ func RunTurn(ctx context.Context, cfg TurnConfig) (*Turn, error) {
 
 	toolSet := cfg.Tools.clone()
 	maxToolIterations := normalizeMaxToolIterations(cfg.MaxToolIterations)
+	toolLimitPrompt := cmp.Or(strings.TrimSpace(cfg.ToolLimitPrompt), DefaultToolLimitPrompt)
 	messages := llm.CloneMessages(cfg.InitialContext)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: input})
 	turnMessages := []llm.Message{{Role: llm.RoleUser, Content: input, CreatedAt: time.Now()}}
@@ -187,7 +195,7 @@ func RunTurn(ctx context.Context, cfg TurnConfig) (*Turn, error) {
 			if err := prepare(); err != nil {
 				return fail(err)
 			}
-			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: toolLimitFinalPrompt})
+			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: toolLimitPrompt})
 			finalResponse, err := request(true)
 			if err != nil {
 				return fail(err)
