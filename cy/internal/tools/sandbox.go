@@ -2,6 +2,7 @@ package tools
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,23 @@ func HardenSupervisor() { hardenSupervisor() }
 
 func SandboxBackend() string { return sandboxBackend() }
 
+// SandboxedCommand builds a command that runs program under this platform's
+// fence. program is a path, never resolved against PATH by the fence itself,
+// and args is what the program sees as its own arguments with args[0] included
+// — so a caller can give a program a process name that differs from its path.
+//
+// Callers that want a shell want SandboxedBashCommand, which is one use of
+// this rather than a mechanism beside it.
+func SandboxedCommand(program string, args []string, workspace, workdir, home, policy string) (*exec.Cmd, error) {
+	if program == "" {
+		return nil, errors.New("sandboxed command needs a program to run")
+	}
+	if len(args) == 0 {
+		return nil, errors.New("sandboxed command needs at least a process name")
+	}
+	return sandboxedCommand(program, args, workspace, workdir, home, policy)
+}
+
 func SandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
 	return sandboxedBashCommand(command, workspace, workdir, home, policy)
 }
@@ -26,6 +44,19 @@ func SandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 func ambientBashCommand(command, workdir string) *exec.Cmd {
 	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = workdir
+	return cmd
+}
+
+// ambientCommand runs a program with no fence around it. Unlike the shell
+// above — which is a human's or the model's own command line, and has always
+// inherited this process's environment when unsandboxed — a program launched
+// from configuration gets the scrubbed environment either way. Losing the
+// fence should not also mean handing it the supervisor's credentials.
+func ambientCommand(program string, args []string, workdir, home string) *exec.Cmd {
+	cmd := exec.Command(program, args[1:]...)
+	cmd.Args = args
+	cmd.Dir = workdir
+	cmd.Env = minimalToolEnv(home)
 	return cmd
 }
 

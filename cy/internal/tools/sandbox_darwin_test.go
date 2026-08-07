@@ -57,6 +57,60 @@ func TestSeatbeltRestrictsFilesystem(t *testing.T) {
 	}
 }
 
+// The fence used to be able to start exactly one thing, bash with a command
+// line. A program launched from configuration is not a shell command, so it has
+// to be startable directly — under the same profile, with nothing in between.
+func TestSeatbeltRunsAProgramWithoutAShell(t *testing.T) {
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(userHome, ".cy-seatbelt-program-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	toolHome, err := os.MkdirTemp(userHome, ".cy-seatbelt-program-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(toolHome) })
+	outsideDir, err := os.MkdirTemp(userHome, ".cy-seatbelt-program-outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+
+	inside := filepath.Join(root, "inside.txt")
+	if err := os.WriteFile(inside, []byte("workspace data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := sandboxedCommand("/bin/cat", []string{"cat", inside}, root, root, toolHome, sandboxOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed program failed: %v: %s", err, output)
+	}
+	if string(output) != "workspace data\n" {
+		t.Fatalf("output = %q", output)
+	}
+
+	denied, err := sandboxedCommand("/bin/cat", []string{"cat", outside}, root, root, toolHome, sandboxOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := denied.CombinedOutput(); err == nil {
+		t.Fatalf("file outside the workspace was readable: %s", output)
+	}
+}
+
 func TestSeatbeltProfileKeepsNetworkOpen(t *testing.T) {
 	if !strings.Contains(seatbeltProfile, "(allow network*)") {
 		t.Fatal("seatbelt profile does not keep network open")

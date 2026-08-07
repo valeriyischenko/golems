@@ -15,6 +15,36 @@ func runSandboxChildIfRequested() bool { return false }
 
 func sandboxBackend() string { return "seatbelt" }
 
+// systemBashPath mirrors the Linux helper of the same name. macOS always ships
+// bash at this path, so there is nothing to search for.
+func systemBashPath() string { return "/bin/bash" }
+
+// sandboxedCommand wraps the program in sandbox-exec, which applies the profile
+// and then execs it. Note that args[0] cannot be honoured here: sandbox-exec
+// takes a path and builds the argument list itself, so the program always sees
+// its own path as the process name.
+func sandboxedCommand(program string, args []string, workspace, workdir, home, policy string) (*exec.Cmd, error) {
+	if policy == sandboxOff {
+		return ambientCommand(program, args, workdir, home), nil
+	}
+	if _, err := os.Stat(sandboxExecPath); err != nil {
+		if policy == sandboxOn {
+			return nil, errors.New("macOS sandbox-exec is unavailable")
+		}
+		return ambientCommand(program, args, workdir, home), nil
+	}
+	sandboxArgs := append([]string{
+		"-D", "WORKSPACE=" + canonicalSandboxPath(workspace),
+		"-D", "TOOL_HOME=" + canonicalSandboxPath(home),
+		"-p", seatbeltProfile,
+		program,
+	}, args[1:]...)
+	cmd := exec.Command(sandboxExecPath, sandboxArgs...)
+	cmd.Dir = workdir
+	cmd.Env = minimalToolEnv(home)
+	return cmd, nil
+}
+
 func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
 	if policy == sandboxOff {
 		return ambientBashCommand(command, workdir), nil
@@ -25,15 +55,7 @@ func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 		}
 		return ambientBashCommand(command, workdir), nil
 	}
-	cmd := exec.Command(sandboxExecPath,
-		"-D", "WORKSPACE="+canonicalSandboxPath(workspace),
-		"-D", "TOOL_HOME="+canonicalSandboxPath(home),
-		"-p", seatbeltProfile,
-		"/bin/bash", "-lc", command,
-	)
-	cmd.Dir = workdir
-	cmd.Env = minimalToolEnv(home)
-	return cmd, nil
+	return sandboxedCommand(systemBashPath(), []string{systemBashPath(), "-lc", command}, workspace, workdir, home, policy)
 }
 
 // sandboxReadOnlyDirs holds the system directories named as read-only subpaths

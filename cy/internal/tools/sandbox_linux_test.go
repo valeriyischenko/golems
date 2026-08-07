@@ -51,6 +51,72 @@ func shellQuoteForTest(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
+// The fence used to be able to start exactly one thing, bash with a command
+// line. A program launched from configuration is not a shell command, so it has
+// to be startable directly — under the same ruleset, with nothing in between.
+func TestSandboxedCommandRunsAProgramWithoutAShell(t *testing.T) {
+	root := t.TempDir()
+	toolHome := t.TempDir()
+	inside := filepath.Join(root, "inside.txt")
+	if err := os.WriteFile(inside, []byte("workspace data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside, err := os.CreateTemp("", "cy-outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outside.Name()) })
+	if _, err := outside.WriteString("supervisor-only\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := outside.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := sandboxedCommand("/bin/cat", []string{"cat", inside}, root, root, toolHome, sandboxOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed program failed: %v: %s", err, output)
+	}
+	if string(output) != "workspace data\n" {
+		t.Fatalf("output = %q", output)
+	}
+
+	denied, err := sandboxedCommand("/bin/cat", []string{"cat", outside.Name()}, root, root, toolHome, sandboxOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := denied.CombinedOutput(); err == nil {
+		t.Fatalf("file outside the workspace was readable: %s", output)
+	}
+}
+
+// A program's own name is part of what it is launched with, and the shell is
+// the caller that cares: bash is executed from an absolute path but has always
+// seen itself as "bash".
+func TestSandboxedCommandHonoursTheProcessName(t *testing.T) {
+	bash := systemBashPath()
+	if bash == "" {
+		t.Skip("system bash is unavailable")
+	}
+	root := t.TempDir()
+	toolHome := t.TempDir()
+	cmd, err := sandboxedCommand(bash, []string{"cy-tool", "-c", `printf %s "$0"`}, root, root, toolHome, sandboxOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed program failed: %v: %s", err, output)
+	}
+	if string(output) != "cy-tool" {
+		t.Fatalf("process name = %q", output)
+	}
+}
+
 func TestSandboxedBashNestedWorkdirCanAccessWorkspace(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "nested")

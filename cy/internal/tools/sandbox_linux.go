@@ -3,6 +3,8 @@
 package tools
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,10 +15,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const sandboxChildArg = "__cy_sandbox_bash"
+const sandboxChildArg = "__cy_sandbox_run"
 
 const (
-	envSandboxCommand = "CY_INTERNAL_SANDBOX_COMMAND"
+	envSandboxProgram = "CY_INTERNAL_SANDBOX_PROGRAM"
+	envSandboxArgs    = "CY_INTERNAL_SANDBOX_ARGS"
 	envSandboxRoot    = "CY_INTERNAL_SANDBOX_ROOT"
 	envSandboxHome    = "CY_INTERNAL_SANDBOX_HOME"
 	envSandboxPolicy  = "CY_INTERNAL_SANDBOX_POLICY"
@@ -26,42 +29,64 @@ func runSandboxChildIfRequested() bool {
 	if len(os.Args) < 2 || os.Args[1] != sandboxChildArg {
 		return false
 	}
-	runSandboxedBash()
+	runSandboxedProgram()
 	return true
 }
 
 func sandboxBackend() string { return "landlock" }
 
+// sandboxedCommand re-execs this binary, which restricts itself and then execs
+// program. The restriction has to be applied by the process that will run the
+// program: a Landlock ruleset covers the thread that installs it and everything
+// it goes on to spawn, and can never be relaxed, so the supervisor must stay
+// outside it.
+func sandboxedCommand(program string, args []string, workspace, workdir, home, policy string) (*exec.Cmd, error) {
+	if policy == sandboxOff {
+		return ambientCommand(program, args, workdir, home), nil
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("encode sandboxed arguments: %w", err)
+	}
+	cmd := exec.Command("/proc/self/exe", sandboxChildArg)
+	cmd.Dir = workdir
+	cmd.Env = sandboxControlEnv(program, string(encoded), workspace, home, policy)
+	return cmd, nil
+}
+
 func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
 	if policy == sandboxOff {
 		return ambientBashCommand(command, workdir), nil
 	}
-	cmd := exec.Command("/proc/self/exe", sandboxChildArg)
-	cmd.Dir = workdir
-	cmd.Env = sandboxControlEnv(command, workspace, home, policy)
-	return cmd, nil
+	bash := systemBashPath()
+	if bash == "" {
+		return nil, errors.New("system Bash is unavailable")
+	}
+	return sandboxedCommand(bash, []string{"bash", "-lc", command}, workspace, workdir, home, policy)
 }
 
-func sandboxControlEnv(command, workspace, home, policy string) []string {
-	if policy == sandboxOff {
-		return nil
-	}
+func sandboxControlEnv(program, args, workspace, home, policy string) []string {
 	return append(minimalToolEnv(home),
-		envSandboxCommand+"="+command,
+		envSandboxProgram+"="+program,
+		envSandboxArgs+"="+args,
 		envSandboxRoot+"="+workspace,
 		envSandboxHome+"="+home,
 		envSandboxPolicy+"="+policy,
 	)
 }
 
-func runSandboxedBash() {
-	command := os.Getenv(envSandboxCommand)
+func runSandboxedProgram() {
+	program := os.Getenv(envSandboxProgram)
 	workspace := os.Getenv(envSandboxRoot)
 	home := os.Getenv(envSandboxHome)
 	policy := os.Getenv(envSandboxPolicy)
-	bash := systemBashPath()
-	if bash == "" {
-		fmt.Fprintln(os.Stderr, "sandbox: system Bash is unavailable")
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv(envSandboxArgs)), &args); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: decode arguments: %v\n", err)
+		os.Exit(126)
+	}
+	if program == "" || len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "sandbox: no program to run")
 		os.Exit(126)
 	}
 	runtime.LockOSThread()
@@ -69,8 +94,10 @@ func runSandboxedBash() {
 		fmt.Fprintf(os.Stderr, "sandbox: %v\n", err)
 		os.Exit(126)
 	}
-	if err := syscall.Exec(bash, []string{"bash", "-lc", command}, minimalToolEnv(home)); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox exec bash: %v\n", err)
+	// The control variables are deliberately not passed on: the program runs
+	// with the same scrubbed environment it would have had without them.
+	if err := syscall.Exec(program, args, minimalToolEnv(home)); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox exec %s: %v\n", program, err)
 		os.Exit(126)
 	}
 }
