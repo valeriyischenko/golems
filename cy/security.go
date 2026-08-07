@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ type SecurityState struct {
 	Probe           string
 	EffectivePolicy string
 	Container       string
+	Grants          toolruntime.SandboxGrants
 }
 
 type containerProbe struct {
@@ -55,7 +57,7 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 		container = detectContainer(ctx)
 	}
 	effectivePolicy := effectiveSandboxPolicy(cfg.SandboxPolicy, container)
-	state := SecurityState{EffectivePolicy: effectivePolicy}
+	state := SecurityState{EffectivePolicy: effectivePolicy, Grants: cfg.SandboxGrants}
 	if effectivePolicy == sandboxOff {
 		state.Container = container
 		return state
@@ -64,8 +66,15 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 	if backend == "" {
 		return unavailableSandbox(state, "no platform sandbox is available")
 	}
-	toolHome := toolruntime.WorkspaceToolHome(resolveStateHome(cfg.Home), root)
-	probeDir := resolveStateHome(cfg.Home)
+	stateHome := resolveStateHome(cfg.Home)
+	box := toolruntime.Sandbox{
+		Policy:    effectivePolicy,
+		Workspace: root,
+		ToolHome:  toolruntime.WorkspaceToolHome(stateHome, root),
+		StateHome: stateHome,
+		Grants:    cfg.SandboxGrants,
+	}
+	probeDir := stateHome
 	if store != nil {
 		probeDir = store.Dir()
 	}
@@ -83,7 +92,7 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 		return unavailableSandbox(state, "probe setup failed: "+err.Error())
 	}
 	command := "if IFS= read -r _ < " + bashQuote(probePath) + " 2>/dev/null; then exit 42; else exit 0; fi"
-	cmd, err := toolruntime.SandboxedBashCommand(command, root, root, toolHome, effectivePolicy)
+	cmd, err := box.BashCommand(command, root)
 	if err != nil {
 		return unavailableSandbox(state, "sandbox command failed: "+err.Error())
 	}
@@ -100,7 +109,7 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 42 {
-		return unavailableSandbox(state, probeReadableReason(probeDir, root, toolHome))
+		return unavailableSandbox(state, probeReadableReason(probeDir, box))
 	}
 	return unavailableSandbox(state, "sandbox probe failed: "+err.Error())
 }
@@ -110,9 +119,9 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 // directory tool processes are granted, most often the workspace itself. Say
 // which directory it is and how to move out of it, because the reader has to
 // act on this and the symptom alone does not tell them how.
-func probeReadableReason(probeDir, workspace, toolHome string) string {
+func probeReadableReason(probeDir string, box toolruntime.Sandbox) string {
 	reason := "sandbox probe path remained readable"
-	granted := grantedDirContaining(probeDir, toolruntime.SandboxGrantedDirs(workspace, toolHome))
+	granted := grantedDirContaining(probeDir, box.GrantedDirs())
 	if granted == "" {
 		return reason
 	}
@@ -170,6 +179,7 @@ func (s SecurityState) Journal(requested string) session.SandboxState {
 		Backend:   s.Backend,
 		Probe:     s.Probe,
 		Container: s.Container,
+		Grants:    s.Grants.Journal(),
 	}
 }
 
@@ -184,7 +194,17 @@ func (s SecurityState) Journal(requested string) session.SandboxState {
 // this machine worth stopping for, and running without isolation should be
 // something asked for rather than something arrived at.
 func requireEffectiveSandbox(cfg Config) error {
-	if cfg.SandboxPolicy == sandboxOff || cfg.Security.Active() {
+	if cfg.Security.Active() {
+		return nil
+	}
+	// A hide is an assertion and not a hint. Every other reason to run without
+	// a fence is Cy deciding that nothing was promised; a file that says to keep
+	// a directory away from tools has promised something, and honouring it
+	// nowhere while starting anyway is the one outcome nobody asked for.
+	if hidden := cfg.hiddenPaths(); len(hidden) > 0 {
+		return fmt.Errorf("%s hides %s from tools and this run has no sandbox to hide it with: %s", cfg.ToolsFile, strings.Join(hidden, ", "), cmp.Or(cfg.Security.Probe, "sandbox is off"))
+	}
+	if cfg.SandboxPolicy == sandboxOff {
 		return nil
 	}
 	if cfg.SandboxPolicy == sandboxOn {

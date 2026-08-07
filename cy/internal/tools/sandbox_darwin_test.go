@@ -42,7 +42,7 @@ func TestSeatbeltRestrictsFilesystem(t *testing.T) {
 	command := "printf ok > inside.txt; " +
 		"if cat " + shellQuoteForTest(outside) + " >/dev/null 2>&1; then exit 41; fi; " +
 		"if printf nope > " + shellQuoteForTest(outside) + " 2>/dev/null; then exit 42; fi"
-	cmd, err := sandboxedBashCommand(command, root, workdir, toolHome, sandboxOn)
+	cmd, err := sandboxedBashCommand(testSandbox(root, toolHome, sandboxOn), command, workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestSeatbeltRunsAProgramWithoutAShell(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd, err := sandboxedCommand("/bin/cat", []string{"cat", inside}, root, root, toolHome, sandboxOn)
+	cmd, err := sandboxedCommand(testSandbox(root, toolHome, sandboxOn), "/bin/cat", []string{"cat", inside}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestSeatbeltRunsAProgramWithoutAShell(t *testing.T) {
 		t.Fatalf("output = %q", output)
 	}
 
-	denied, err := sandboxedCommand("/bin/cat", []string{"cat", outside}, root, root, toolHome, sandboxOn)
+	denied, err := sandboxedCommand(testSandbox(root, toolHome, sandboxOn), "/bin/cat", []string{"cat", outside}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestExternalToolIsFencedLikeBash(t *testing.T) {
 }
 
 func TestSeatbeltProfileKeepsNetworkOpen(t *testing.T) {
-	if !strings.Contains(seatbeltProfile, "(allow network*)") {
+	if !strings.Contains(seatbeltProfile(testSandbox(t.TempDir(), t.TempDir(), sandboxOn)), "(allow network*)") {
 		t.Fatal("seatbelt profile does not keep network open")
 	}
 }
@@ -156,37 +156,11 @@ func TestSeatbeltProfileKeepsNetworkOpen(t *testing.T) {
 // scratch files went somewhere every other process on the machine could read,
 // and anything left there by anyone else was reachable from inside the fence.
 func TestSeatbeltProfileDoesNotGrantSharedTemp(t *testing.T) {
+	profile := seatbeltProfile(testSandbox(t.TempDir(), t.TempDir(), sandboxOn))
 	for _, shared := range []string{"/private/tmp", "/private/var/tmp", "TEMP_DIR"} {
-		if strings.Contains(seatbeltProfile, shared) {
+		if strings.Contains(profile, shared) {
 			t.Fatalf("seatbelt profile still grants %s", shared)
 		}
-	}
-}
-
-// The profile is a literal, so the list used to report what is reachable can
-// drift away from what is actually granted. Check both directions.
-func TestSeatbeltReadOnlyDirsMatchProfile(t *testing.T) {
-	granted := make(map[string]bool)
-	for _, line := range strings.Split(seatbeltProfile, "\n") {
-		line = strings.TrimSpace(line)
-		rest, ok := strings.CutPrefix(line, `(subpath "`)
-		if !ok {
-			continue
-		}
-		path, _, _ := strings.Cut(rest, `"`)
-		granted[path] = true
-	}
-	for _, dir := range sandboxReadOnlyDirs {
-		if !granted[dir] {
-			t.Errorf("sandboxReadOnlyDirs names %s, which the profile does not grant", dir)
-		}
-		delete(granted, dir)
-	}
-	for dir := range granted {
-		if dir == "/dev/fd" {
-			continue
-		}
-		t.Errorf("profile grants %s, which sandboxReadOnlyDirs does not name", dir)
 	}
 }
 
@@ -223,7 +197,7 @@ func TestSandboxedToolTempStaysInsideTheToolHome(t *testing.T) {
 	}
 	command := `printf scratch > "$TMPDIR/scratch.txt"; ` +
 		"if cat " + shellQuoteForTest(outside.Name()) + " >/dev/null 2>&1; then exit 41; fi"
-	cmd, err := sandboxedBashCommand(command, root, root, toolHome, sandboxOn)
+	cmd, err := sandboxedBashCommand(testSandbox(root, toolHome, sandboxOn), command, root)
 	if err != nil {
 		t.Fatal(err)
 	}

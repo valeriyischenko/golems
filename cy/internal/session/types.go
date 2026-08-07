@@ -54,6 +54,21 @@ type SandboxState struct {
 	Backend   string `json:"backend,omitempty"`
 	Probe     string `json:"probe,omitempty"`
 	Container string `json:"container,omitempty"`
+	// Grants is what configuration added to the fence for every tool this run,
+	// as resolved: absolute paths, not the relative ones the file was written
+	// with. That resolution is the part a reader cannot redo, since it depended
+	// on where the tools file was and who ran Cy.
+	Grants SandboxGrants `json:"grants,omitzero"`
+}
+
+// SandboxGrants is the paths configuration added to, and took away from, a
+// fence. It repeats three fields the runtime also has rather than sharing them,
+// for the reason SandboxState and SecurityState stay apart: one is a decision
+// with machinery behind it, this is what a reader of the file needs afterwards.
+type SandboxGrants struct {
+	Read  []string `json:"read,omitempty"`
+	Write []string `json:"write,omitempty"`
+	Hide  []string `json:"hide,omitempty"`
 }
 
 // SessionConfigured is what the model is working with: the prompts it was given,
@@ -119,11 +134,11 @@ type ExternalToolConfig struct {
 	// Effect decides whether calls run concurrently and whether a restricted
 	// profile exposes the tool, so it changes behaviour that nothing else here
 	// would explain.
-	Effect   string   `json:"effect"`
-	Program  string   `json:"program"`
-	Command  []string `json:"command"`
-	Workdir string `json:"workdir,omitempty"`
-	Timeout string `json:"timeout,omitempty"`
+	Effect  string   `json:"effect"`
+	Program string   `json:"program"`
+	Command []string `json:"command"`
+	Workdir string   `json:"workdir,omitempty"`
+	Timeout string   `json:"timeout,omitempty"`
 	// Background and Yield say whether a call on this tool can end with the
 	// tool still running, which changes both the schema the model was shown and
 	// what a result means. Absent is the tool always being waited for.
@@ -134,6 +149,10 @@ type ExternalToolConfig struct {
 	// setting that let it happen.
 	Detach   bool     `json:"detach,omitempty"`
 	EnvNames []string `json:"env_names,omitempty"`
+	// Sandbox is what this tool asked for beyond the run-level grants, which is
+	// the one thing about a configured tool's fence that differs from every
+	// other tool's and from Bash's.
+	Sandbox SandboxGrants `json:"sandbox,omitzero"`
 }
 
 // SessionSettings are the operational bounds the session runs under: where the

@@ -179,6 +179,56 @@ func TestRequireEffectiveSandbox(t *testing.T) {
 	})
 }
 
+// Every other way to end up without a fence is Cy deciding nothing was
+// promised. A hide was a promise, so it outranks all of them: the policy that
+// says off, and the container that would otherwise be trusted.
+func TestRequireEffectiveSandboxRefusesAnUnhideableHide(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "run-level, sandbox off on purpose",
+			cfg:  Config{SandboxPolicy: sandboxOff, SandboxGrants: toolruntime.SandboxGrants{Hide: []string{"/keep/out"}}},
+		},
+		{
+			name: "per tool, inside a trusted container",
+			cfg: Config{
+				SandboxPolicy: sandboxAuto,
+				ExternalTools: []toolruntime.ExternalTool{{Sandbox: toolruntime.SandboxGrants{Hide: []string{"/keep/out"}}}},
+				Security:      SecurityState{EffectivePolicy: sandboxOff, Container: "podman"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ToolsFile = "/etc/cy/tools.json"
+			err := requireEffectiveSandbox(cfg)
+			if err == nil {
+				t.Fatal("error = nil, want a refusal to run with a hide nothing can honour")
+			}
+			// The file that asked and the path it asked about: without both,
+			// whoever reads this cannot tell which line to delete.
+			if !strings.Contains(err.Error(), cfg.ToolsFile) || !strings.Contains(err.Error(), "/keep/out") {
+				t.Fatalf("error = %q, want the tools file and the hidden path", err)
+			}
+		})
+	}
+
+	if backend := toolruntime.SandboxBackend(); backend != "" {
+		t.Run("a fence that held honours it", func(t *testing.T) {
+			cfg := Config{
+				SandboxPolicy: sandboxAuto,
+				SandboxGrants: toolruntime.SandboxGrants{Hide: []string{"/keep/out"}},
+				Security:      SecurityState{Backend: backend},
+			}
+			if err := requireEffectiveSandbox(cfg); err != nil {
+				t.Fatalf("error = %v, want none", err)
+			}
+		})
+	}
+}
+
 func TestSandboxUnavailableNotice(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -296,7 +346,7 @@ func TestProbeReadableReasonNamesTheGrantedDirectory(t *testing.T) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	reason := probeReadableReason(home, workspace, filepath.Join(home, "tool-cache"))
+	reason := probeReadableReason(home, toolruntime.Sandbox{Workspace: workspace, ToolHome: filepath.Join(home, "tool-cache"), StateHome: home})
 	for _, want := range []string{"sandbox probe path remained readable", canonicalPath(workspace), "--home"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("reason = %q, want it to mention %q", reason, want)
@@ -310,7 +360,7 @@ func TestProbeReadableReasonNamesTheGrantedDirectory(t *testing.T) {
 func TestProbeReadableReasonKeepsTheSymptomWhenTheCauseIsElsewhere(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
-	reason := probeReadableReason(home, workspace, filepath.Join(home, "tool-cache"))
+	reason := probeReadableReason(home, toolruntime.Sandbox{Workspace: workspace, ToolHome: filepath.Join(home, "tool-cache"), StateHome: home})
 	if reason != "sandbox probe path remained readable" {
 		t.Fatalf("reason = %q, want the symptom alone", reason)
 	}

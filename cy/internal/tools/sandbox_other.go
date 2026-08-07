@@ -12,22 +12,22 @@ func runSandboxChildIfRequested() bool { return false }
 
 func sandboxBackend() string { return "" }
 
-func sandboxedCommand(program string, args []string, workspace, workdir, home, policy string) (*exec.Cmd, error) {
-	if policy == sandboxOn {
+// Nothing is fenced here, so nothing is granted in the sense the other
+// platforms mean it: there is no boundary for a path to be inside of.
+var sandboxReadOnlyDirs []string
+
+func sandboxedCommand(box Sandbox, program string, args []string, workdir string) (*exec.Cmd, error) {
+	if box.Policy == sandboxOn {
 		return nil, errors.New("sandbox is unavailable on " + runtime.GOOS)
 	}
-	return ambientCommand(program, args, workdir, home), nil
+	return ambientCommand(program, args, workdir, box.ToolHome), nil
 }
 
-func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
-	if policy == sandboxOn {
+func sandboxedBashCommand(box Sandbox, command, workdir string) (*exec.Cmd, error) {
+	if box.Policy == sandboxOn {
 		return nil, errors.New("sandbox is unavailable on " + runtime.GOOS)
 	}
 	return ambientBashCommand(command, workdir), nil
 }
-
-// Nothing is fenced here, so no directory is granted in the sense the other
-// platforms mean it: there is no boundary for a path to be inside of.
-func sandboxGrantedDirs(workspace, home string) []string { return nil }
 
 func hardenSupervisor() {}

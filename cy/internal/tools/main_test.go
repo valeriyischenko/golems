@@ -13,3 +13,10 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// testSandbox is the fence the sandbox tests build: a workspace, a tool home,
+// and no configured grants. Cy's own home is not among them, so nothing here
+// exercises the hiding path; the tests that do name it themselves.
+func testSandbox(workspace, toolHome, policy string) Sandbox {
+	return Sandbox{Policy: policy, Workspace: workspace, ToolHome: toolHome}
+}

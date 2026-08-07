@@ -80,7 +80,7 @@ type processManager struct {
 	sessionID       string
 	jobLauncher     []string
 	logLimit        int64
-	sandbox         string
+	sandbox         Sandbox
 	allowBackground bool
 
 	// stopped releases the watchers of detached jobs, which are polling a file
@@ -150,6 +150,10 @@ type ProcessOptions struct {
 	Home      string
 	SessionID string
 	Sandbox   string
+	// Grants are what the tools file added to, and took away from, the fence
+	// every tool process runs behind. A tool's own block is folded in per call;
+	// this is the part Bash gets too.
+	Grants SandboxGrants
 	// Background says whether the model may ask for work that outlives its
 	// tool call.
 	Background bool
@@ -189,13 +193,19 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 		return nil, fmt.Errorf("create tool temp: %w", err)
 	}
 	manager := &processManager{
-		workspace:       workspace,
-		home:            opts.Home,
-		toolHome:        toolHome,
-		sessionID:       opts.SessionID,
-		jobLauncher:     launcher,
-		logLimit:        defaultCommandLogLimit,
-		sandbox:         opts.Sandbox,
+		workspace:   workspace,
+		home:        opts.Home,
+		toolHome:    toolHome,
+		sessionID:   opts.SessionID,
+		jobLauncher: launcher,
+		logLimit:    defaultCommandLogLimit,
+		sandbox: Sandbox{
+			Policy:    opts.Sandbox,
+			Workspace: workspace.root,
+			ToolHome:  toolHome,
+			StateHome: opts.Home,
+			Grants:    opts.Grants,
+		},
 		allowBackground: opts.Background,
 		stopped:         make(chan struct{}),
 		jobs:            make(map[string]*processJob),
@@ -390,7 +400,7 @@ func (m *processManager) SetSandbox(policy string) error {
 	if m.closed {
 		return errors.New("process manager is closed")
 	}
-	m.sandbox = policy
+	m.sandbox.Policy = policy
 	return nil
 }
 
@@ -742,7 +752,7 @@ func (m *processManager) startJob(spec jobSpec) (*processJob, error) {
 
 func (m *processManager) start(command, workdir string, timeout time.Duration, origin processOrigin) (*processJob, error) {
 	m.mu.Lock()
-	sandbox := m.sandbox
+	box := m.sandbox
 	m.mu.Unlock()
 
 	var commandProcess *exec.Cmd
@@ -753,7 +763,7 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 		commandProcess.Dir = workdir
 		commandProcess.Env = os.Environ()
 	case processOriginAgent:
-		commandProcess, err = sandboxedBashCommand(command, m.workspace.root, workdir, m.toolHome, sandbox)
+		commandProcess, err = box.BashCommand(command, workdir)
 		if err != nil {
 			return nil, fmt.Errorf("prepare bash: %w", err)
 		}

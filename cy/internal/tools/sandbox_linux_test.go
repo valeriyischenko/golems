@@ -35,7 +35,7 @@ func TestSandboxedToolTempStaysInsideTheToolHome(t *testing.T) {
 	}
 	command := `printf scratch > "$TMPDIR/scratch.txt"; ` +
 		"if cat " + shellQuoteForTest(outside.Name()) + " >/dev/null 2>&1; then exit 41; fi"
-	cmd, err := sandboxedBashCommand(command, root, root, toolHome, sandboxOn)
+	cmd, err := sandboxedBashCommand(testSandbox(root, toolHome, sandboxOn), command, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestSandboxedCommandRunsAProgramWithoutAShell(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd, err := sandboxedCommand("/bin/cat", []string{"cat", inside}, root, root, toolHome, sandboxOn)
+	cmd, err := sandboxedCommand(testSandbox(root, toolHome, sandboxOn), "/bin/cat", []string{"cat", inside}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestSandboxedCommandRunsAProgramWithoutAShell(t *testing.T) {
 		t.Fatalf("output = %q", output)
 	}
 
-	denied, err := sandboxedCommand("/bin/cat", []string{"cat", outside.Name()}, root, root, toolHome, sandboxOn)
+	denied, err := sandboxedCommand(testSandbox(root, toolHome, sandboxOn), "/bin/cat", []string{"cat", outside.Name()}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestSandboxedCommandHonoursTheProcessName(t *testing.T) {
 	}
 	root := t.TempDir()
 	toolHome := t.TempDir()
-	cmd, err := sandboxedCommand(bash, []string{"cy-tool", "-c", `printf %s "$0"`}, root, root, toolHome, sandboxOn)
+	cmd, err := sandboxedCommand(testSandbox(root, toolHome, sandboxOn), bash, []string{"cy-tool", "-c", `printf %s "$0"`}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestSandboxedBashNestedWorkdirCanAccessWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolHome := t.TempDir()
-	cmd, err := sandboxedBashCommand("cat ../source.txt > ../copy.txt", root, workdir, toolHome, sandboxAuto)
+	cmd, err := sandboxedBashCommand(testSandbox(root, toolHome, sandboxAuto), "cat ../source.txt > ../copy.txt", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}

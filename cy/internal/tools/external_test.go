@@ -64,9 +64,9 @@ func TestLoadExternalToolsReadsADeclaration(t *testing.T) {
 // and wrong is the opposite: it means someone declared tools this run will not
 // have, and running anyway hides that.
 func TestLoadExternalToolsAcceptsAMissingFile(t *testing.T) {
-	declarations, err := LoadExternalTools(filepath.Join(t.TempDir(), "absent.json"))
-	if err != nil || declarations != nil {
-		t.Fatalf("declarations = %v, err = %v", declarations, err)
+	config, err := LoadExternalTools(filepath.Join(t.TempDir(), "absent.json"))
+	if err != nil || config.Tools != nil {
+		t.Fatalf("config = %+v, err = %v", config, err)
 	}
 }
 
@@ -254,7 +254,7 @@ func runFencedExternalProbe(t *testing.T, workspace, home, script string) string
 		Name: "probe", Description: "test probe", Effect: "read",
 		Command: []string{bash, "-c", script},
 	}
-	if err := declaration.normalize(); err != nil {
+	if err := declaration.normalize(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	tools, _, err := manager.ExternalTools([]ExternalTool{declaration})
@@ -266,11 +266,11 @@ func runFencedExternalProbe(t *testing.T, workspace, home, script string) string
 
 func loadExternalToolsForTest(t *testing.T, config string) []ExternalTool {
 	t.Helper()
-	declarations, err := LoadExternalTools(writeToolConfigForTest(t, config))
+	loaded, err := LoadExternalTools(writeToolConfigForTest(t, config))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return declarations
+	return loaded.Tools
 }
 
 func writeToolConfigForTest(t *testing.T, config string) string {
@@ -295,7 +295,7 @@ func externalToolForTest(t *testing.T, manager *processManager, script string, d
 	declaration.Name = "probe"
 	declaration.Description = "test probe"
 	declaration.Command = []string{bash, "-c", script}
-	if err := declaration.normalize(); err != nil {
+	if err := declaration.normalize(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	tools, _, buildErr := manager.ExternalTools([]ExternalTool{declaration})

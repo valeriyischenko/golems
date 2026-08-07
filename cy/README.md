@@ -214,6 +214,35 @@ processes, so a home beneath it puts credentials and session journals inside
 the fence. The startup probe detects this and names the granted directory
 responsible; `--home` or `CY_HOME` is how to move out of it.
 
+What tool processes may reach beyond that is configuration. A `sandbox` block
+in `tools.json` takes three lists — `read`, `write`, and `hide` — at the top
+level, where it applies to every tool process including Bash, and inside a tool
+declaration, where it applies to that tool alone and adds to the top-level one:
+
+```json
+{
+  "sandbox": {"read": ["pyenv"], "hide": ["secrets"]},
+  "tools": [{"name": "pytest", "sandbox": {"write": ["~/.cache/pytest"]}}]
+}
+```
+
+(the rest of a tool declaration is elided)
+
+A relative path resolves against the directory holding `tools.json`, so a
+deployment can be moved without editing it; `~/…` is the invoking user's home,
+and an absolute path is taken literally. A path that does not exist is a
+startup error rather than a rule silently built from something else.
+
+`hide` is how the wide grants are narrowed, and it wins where the two overlap.
+Cy's own home is hidden from every tool unconditionally — that is what the inner
+sandbox is for, since no outer one can tell a tool process apart from Cy — while
+the tool home inside it stays writable, because the deeper rule wins over the
+shallower. Seatbelt expresses a hide directly; Landlock has no masking
+primitive, so a hidden path is left out by granting its siblings instead, which
+means a sibling created after the run started is denied rather than granted.
+A `hide` is an assertion: a run that has no working sandbox to honour it with
+refuses to start, whatever the policy says.
+
 The read-only grants are wide. A tool process can read the system tree —
 `/usr`, `/bin`, `/etc` and the rest, plus `/Applications`, `/Library` and
 `/System` on macOS — because that is what it takes for an interpreter to find

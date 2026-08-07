@@ -580,6 +580,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		Home:        resolveStateHome(cfg.Home),
 		SessionID:   journal.ID(),
 		Sandbox:     runtimeSandboxPolicy(cfg),
+		Grants:      cfg.SandboxGrants,
 		Background:  cfg.BackgroundJobs(),
 		JobLauncher: cfg.JobLauncher,
 		Delivered:   replayed.DeliveredJobs,

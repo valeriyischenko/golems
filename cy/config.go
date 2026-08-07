@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -56,6 +57,9 @@ type Config struct {
 	// record which ones they were.
 	ToolsFile     string
 	ExternalTools []toolruntime.ExternalTool
+	// SandboxGrants is the run-level part of the same file: what every tool
+	// process may reach beyond the built-in ruleset, Bash included.
+	SandboxGrants toolruntime.SandboxGrants
 	Security      SecurityState
 	PrintMode     bool
 	SaveSession   bool
@@ -92,6 +96,18 @@ func (c Config) BackgroundJobs() bool {
 		return *c.Background
 	}
 	return !c.PrintMode
+}
+
+// hiddenPaths lists everything the tools file asks to be kept away from tool
+// processes, run-level and per tool together. Nothing distinguishes the two
+// here: either is a promise that only a working fence can keep.
+func (c Config) hiddenPaths() []string {
+	hidden := slices.Clone(c.SandboxGrants.Hide)
+	for _, tool := range c.ExternalTools {
+		hidden = append(hidden, tool.Sandbox.Hide...)
+	}
+	slices.Sort(hidden)
+	return slices.Compact(hidden)
 }
 
 // loadPromptFile reads a prompt whose text is configuration rather than code.

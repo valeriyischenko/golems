@@ -43,6 +43,12 @@ type ExternalTool struct {
 	Timeout     int               `json:"timeout,omitempty"`
 	Workdir     string            `json:"workdir,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
+	// Sandbox is what this tool needs on top of the run-level grants, and what
+	// it should not have despite them. An interpreter whose packages live under
+	// the real home is the case to expect: it cannot work inside a fence of the
+	// workspace and its own tool home, and lifting the fence for every tool to
+	// suit one of them is the trade this avoids.
+	Sandbox SandboxGrants `json:"sandbox,omitzero"`
 	// Background says who decides that this tool's work outlives the call.
 	Background BackgroundMode `json:"background,omitempty"`
 	// Yield is how many seconds a foreground call waits before it hands the
@@ -103,30 +109,46 @@ func (b *BackgroundMode) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-type externalToolFile struct {
-	Tools []ExternalTool `json:"tools"`
+// ToolConfig is a tools file as one run resolved it: the tools it declares, and
+// the fence they and Bash run behind.
+//
+// The sandbox block is here rather than in a file of its own because the
+// per-tool blocks have to live beside the tools anyway, and two files that must
+// agree about the same vocabulary is one more thing to get wrong.
+type ToolConfig struct {
+	Sandbox SandboxGrants  `json:"sandbox,omitzero"`
+	Tools   []ExternalTool `json:"tools"`
 }
 
 // LoadExternalTools reads the tool declarations at path. No file means no
 // external tools, which is the ordinary case; a file that does not parse or
 // does not validate is a configuration error, because the alternative is a run
 // that silently offers the model fewer tools than its author declared.
-func LoadExternalTools(path string) ([]ExternalTool, error) {
+//
+// Sandbox paths are resolved against the directory holding the file, so a
+// deployment can be copied elsewhere without being edited, and are checked to
+// exist here so that a mistyped one costs a configuration exit rather than a
+// fence that quietly grants or hides something other than what was written.
+func LoadExternalTools(path string) (ToolConfig, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return ToolConfig{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read tool config %s: %w", path, err)
+		return ToolConfig{}, fmt.Errorf("read tool config %s: %w", path, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var file externalToolFile
+	var file ToolConfig
 	if err := decoder.Decode(&file); err != nil {
-		return nil, fmt.Errorf("parse tool config %s: %w", path, err)
+		return ToolConfig{}, fmt.Errorf("parse tool config %s: %w", path, err)
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
-		return nil, fmt.Errorf("parse tool config %s: multiple JSON values", path)
+		return ToolConfig{}, fmt.Errorf("parse tool config %s: multiple JSON values", path)
+	}
+	base := filepath.Dir(path)
+	if err := file.Sandbox.resolve(base); err != nil {
+		return ToolConfig{}, fmt.Errorf("tool config %s: %w", path, err)
 	}
 	declared := make(map[string]bool, len(file.Tools))
 	for index := range file.Tools {
@@ -135,18 +157,18 @@ func LoadExternalTools(path string) ([]ExternalTool, error) {
 		if label == "" {
 			label = fmt.Sprintf("entry %d", index+1)
 		}
-		if err := tool.normalize(); err != nil {
-			return nil, fmt.Errorf("tool %s in %s: %w", label, path, err)
+		if err := tool.normalize(base); err != nil {
+			return ToolConfig{}, fmt.Errorf("tool %s in %s: %w", label, path, err)
 		}
 		if declared[tool.Name] {
-			return nil, fmt.Errorf("tool config %s declares %q twice", path, tool.Name)
+			return ToolConfig{}, fmt.Errorf("tool config %s declares %q twice", path, tool.Name)
 		}
 		declared[tool.Name] = true
 	}
-	return file.Tools, nil
+	return file, nil
 }
 
-func (t *ExternalTool) normalize() error {
+func (t *ExternalTool) normalize(base string) error {
 	t.Name = strings.TrimSpace(t.Name)
 	if !externalToolNamePattern.MatchString(t.Name) {
 		return errors.New("name must start with a letter and hold only letters, digits and underscores")
@@ -224,7 +246,7 @@ func (t *ExternalTool) normalize() error {
 			return fmt.Errorf("env %s is reserved", key)
 		}
 	}
-	return nil
+	return t.Sandbox.resolve(base)
 }
 
 func (t ExternalTool) timeout() time.Duration {
@@ -248,6 +270,7 @@ func (t ExternalTool) rendered(program string, mode BackgroundMode, yield time.D
 		Command: t.Command,
 		Workdir: t.Workdir,
 		Timeout: t.timeout().String(),
+		Sandbox: t.Sandbox.Journal(),
 	}
 	if mode != BackgroundNever {
 		config.Background = string(mode)
@@ -413,21 +436,14 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		}
 
 		m.mu.Lock()
-		sandbox := m.sandbox
+		box := m.sandbox.With(declaration.Sandbox)
 		m.mu.Unlock()
 
-		// The same fence as Bash, deliberately: a program Cy spawns would
-		// otherwise inherit Cy's own reach, $CY_HOME and the journal included.
-		//
-		// TODO: some tools genuinely cannot live inside a ruleset of
-		// {workspace, tool home} -- an interpreter with its packages under the
-		// real home is the case to expect first. Per-tool isolation levels are
-		// wanted and not supported here; the sandbox mechanism becomes a
-		// configured launcher first, and the per-tool opt out hangs off that.
-		// Until then every external tool is fenced identically, because a tool
-		// that visibly does not run is better than isolation that silently is
-		// not there.
-		command, err := SandboxedCommand(program, declaration.Command, m.workspace.root, workdir, m.toolHome, sandbox)
+		// The same fence as Bash, and the same one for every tool that did not
+		// ask for otherwise: a program Cy spawns would inherit Cy's own reach,
+		// the journal included, and no outer sandbox can tell it apart from Cy
+		// to stop that.
+		command, err := box.Command(program, declaration.Command, workdir)
 		if err != nil {
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: %v", golem.ErrToolFatal, declaration.Name, err)
 		}
@@ -453,7 +469,7 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		running := func() golem.ToolResult {
 			meta := ExternalToolMeta{
 				Tool: declaration.Name, Program: program, Command: declaration.Command,
-				Workdir: display, Sandbox: sandbox, JobID: job.id,
+				Workdir: display, Sandbox: box.Policy, JobID: job.id,
 				DurationMS: time.Since(job.startedAt).Milliseconds(),
 			}
 			return golem.ToolResult{
@@ -508,7 +524,7 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 			Program:    program,
 			Command:    declaration.Command,
 			Workdir:    display,
-			Sandbox:    sandbox,
+			Sandbox:    box.Policy,
 			ExitCode:   exitCode,
 			DurationMS: duration.Milliseconds(),
 			Truncated:  outTruncated || errTruncated,
