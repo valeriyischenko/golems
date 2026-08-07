@@ -72,13 +72,35 @@ func superviseJob(mailbox, program string, args []string) int {
 	command := exec.Command(program, args...)
 	command.Stdin = os.Stdin
 	// Passed through to Cy as before and kept a second time, because the copy
-	// Cy holds dies with Cy. The same writer for both streams is what makes
-	// os/exec give the child one pipe rather than two, so the interleaving the
-	// job produced is the interleaving both readers see.
+	// Cy holds dies with Cy.
+	//
+	// Whether the two streams are one is the caller's decision, not the
+	// supervisor's: Cy hands down either one pipe or two, and the same writer
+	// for both is what makes os/exec give the child one pipe rather than two.
+	// A shell wants them merged in the order they happened; a configured tool
+	// wants its answer on stdout kept clear of its logging on stderr. The file
+	// holds both either way, which is the one place the distinction is lost.
 	log := &jobBuffer{limit: defaultCommandLogLimit}
 	command.Stdout = io.MultiWriter(os.Stdout, log)
-	command.Stderr = command.Stdout
-	waitErr := command.Run()
+	if sameStream(os.Stdout, os.Stderr) {
+		command.Stderr = command.Stdout
+	} else {
+		command.Stderr = io.MultiWriter(os.Stderr, log)
+	}
+	if err := command.Start(); err != nil {
+		// The program never ran. Nobody upstream can see this -- Cy forked the
+		// supervisor, and the supervisor started fine -- so it has to be said
+		// here or not at all.
+		if err := writeJobResult(mailbox, jobResult{
+			Status: jobNotStarted, Error: err.Error(),
+			StartedAt: started, FinishedAt: time.Now().UTC(),
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "job: record result: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "job: %v\n", err)
+		return 126
+	}
+	waitErr := command.Wait()
 
 	stored, discarded := log.stats()
 	result := jobResult{
@@ -111,6 +133,21 @@ func superviseJob(mailbox, program string, args []string) int {
 	// The program never ran, or ended in a way with no code of its own. 126 is
 	// what a shell says for "found it, could not run it".
 	return 126
+}
+
+// sameStream reports whether two of this process's streams are the same open
+// file, which for a pipe means the same pipe. Unreadable either way is treated
+// as separate: two streams is the general case and the safe guess.
+func sameStream(a, b *os.File) bool {
+	first, err := a.Stat()
+	if err != nil {
+		return false
+	}
+	second, err := b.Stat()
+	if err != nil {
+		return false
+	}
+	return os.SameFile(first, second)
 }
 
 // superviseCommand puts the launcher in front of a command Cy would otherwise

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,14 +41,20 @@ const (
 	jobFailed    = "failed"
 	jobKilled    = "killed"
 	jobTimedOut  = "timed_out"
+	// jobNotStarted is the program never running at all: missing, not
+	// executable, a bad interpreter line. Its own status because only the
+	// supervisor can see it -- Cy forks the supervisor, which starts fine --
+	// and because it is the one outcome no amount of rephrasing will fix.
+	jobNotStarted = "not_started"
 )
 
 const (
-	JobRunning   = jobRunning
-	JobCompleted = jobCompleted
-	JobFailed    = jobFailed
-	JobKilled    = jobKilled
-	JobTimedOut  = jobTimedOut
+	JobRunning    = jobRunning
+	JobCompleted  = jobCompleted
+	JobFailed     = jobFailed
+	JobKilled     = jobKilled
+	JobTimedOut   = jobTimedOut
+	JobNotStarted = jobNotStarted
 )
 
 type processOrigin uint8
@@ -82,6 +89,7 @@ type processJob struct {
 	mailbox        string
 	cmd            *exec.Cmd
 	log            *jobBuffer
+	errLog         *jobBuffer
 	done           chan struct{}
 	status         string
 	exitCode       *int
@@ -367,7 +375,7 @@ func (m *processManager) runBash(ctx context.Context, args bashArgs, origin proc
 	case <-job.done:
 		return m.completedForegroundResult(job), nil
 	case <-timer.C:
-		output, truncated := job.log.snapshot(defaultCommandPreview)
+		output, truncated := job.snapshot(defaultCommandPreview)
 		managed := true
 		select {
 		case <-job.done:
@@ -383,7 +391,7 @@ func (m *processManager) runBash(ctx context.Context, args bashArgs, origin proc
 }
 
 func (m *processManager) completedForegroundResult(job *processJob) golem.ToolResult {
-	output, truncated := job.log.snapshot(defaultCommandPreview)
+	output, truncated := job.snapshot(defaultCommandPreview)
 	m.markCompletionSeen(job)
 	m.forget(job)
 	return golem.ToolResult{
@@ -412,7 +420,7 @@ func (m *processManager) job(ctx context.Context, call llm.ToolCall) (golem.Tool
 				return golem.ToolResult{}, err
 			}
 		}
-		content, truncated := job.log.snapshot(maxJobReadBytes)
+		content, truncated := job.snapshot(maxJobReadBytes)
 		m.markCompletionSeen(job)
 		return golem.ToolResult{Content: m.formatJob(job, content, true, true, truncated), Meta: m.processMeta(job, true)}, nil
 	case "stop":
@@ -421,7 +429,7 @@ func (m *processManager) job(ctx context.Context, call llm.ToolCall) (golem.Tool
 			return golem.ToolResult{}, err
 		}
 		m.markCompletionSeen(job)
-		content, truncated := job.log.snapshot(defaultCommandPreview)
+		content, truncated := job.snapshot(defaultCommandPreview)
 		return golem.ToolResult{Content: m.formatJob(job, content, true, true, truncated), Meta: m.processMeta(job, true)}, nil
 	default:
 		return golem.ToolResult{}, errors.New("action must be one of: list, output, wait, stop")
@@ -489,20 +497,98 @@ func summarizeCommand(command string) string {
 	return command
 }
 
-func (m *processManager) start(command, workdir string, timeout time.Duration, origin processOrigin) (*processJob, error) {
+// jobSpec is a program somebody else has already prepared, plus the few things
+// the job machinery cannot work out for itself. The caller decides what runs
+// and behind which fence; everything that makes a job a job -- the id, the
+// mailbox, the supervisor, the process group, the bounded output, the monitor
+// -- happens once, here, so that a shell and a configured program differ only
+// in the command handed in.
+type jobSpec struct {
+	command string
+	process *exec.Cmd
+	timeout time.Duration
+	stdin   io.Reader
+	// stderr keeps the job's two streams apart. Nil is one buffer for both,
+	// which is what a shell wants; a tool whose answer is on stdout wants its
+	// logging kept out of the way.
+	stderr *jobBuffer
+	// supervise is false only for the user's own shell, which bypasses the
+	// fence and the scrubbed environment already, never becomes a managed job,
+	// and has nobody to deliver its completion to but the person who typed it.
+	supervise     bool
+	userInitiated bool
+}
+
+func (m *processManager) startJob(spec jobSpec) (*processJob, error) {
 	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
 		return nil, errors.New("process manager is closed")
 	}
-	sandbox := m.sandbox
-	m.mu.Unlock()
-
 	id, err := newJobID()
 	if err != nil {
 		return nil, err
 	}
+	process := spec.process
+	mailbox := ""
+	if spec.supervise {
+		if process.Err != nil {
+			return nil, process.Err
+		}
+		mailbox = m.mailboxFor(id)
+		if err := os.MkdirAll(mailbox, 0o700); err != nil {
+			return nil, fmt.Errorf("create job mailbox: %w", err)
+		}
+		// Cy's own note in the mailbox, not the supervisor's: what was asked
+		// for, rather than the argv that came of it. Without it a job picked up
+		// by a later run can be listed only as an id.
+		_ = writeJobFile(mailbox, jobCommandFile, []byte(spec.command))
+		process = superviseCommand(m.jobLauncher, mailbox, process)
+	}
+	configureProcessGroup(process)
+	log := &jobBuffer{limit: m.logLimit}
+	process.Stdin = spec.stdin
+	process.Stdout = log
+	process.Stderr = log
+	if spec.stderr != nil {
+		process.Stderr = spec.stderr
+	}
+	if err := process.Start(); err != nil {
+		return nil, err
+	}
+	job := &processJob{
+		id:            id,
+		command:       spec.command,
+		mailbox:       mailbox,
+		cmd:           process,
+		log:           log,
+		errLog:        spec.stderr,
+		done:          make(chan struct{}),
+		status:        jobRunning,
+		startedAt:     time.Now().UTC(),
+		userInitiated: spec.userInitiated,
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		_ = killProcessGroup(process)
+		_ = process.Wait()
+		return nil, errors.New("process manager closed while starting job")
+	}
+	m.jobs[id] = job
+	m.mu.Unlock()
+	go m.monitor(job, spec.timeout)
+	return job, nil
+}
+
+func (m *processManager) start(command, workdir string, timeout time.Duration, origin processOrigin) (*processJob, error) {
+	m.mu.Lock()
+	sandbox := m.sandbox
+	m.mu.Unlock()
+
 	var commandProcess *exec.Cmd
+	var err error
 	switch origin {
 	case processOriginUser:
 		commandProcess = exec.Command("bash", "-lc", command)
@@ -516,52 +602,16 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 	default:
 		return nil, fmt.Errorf("unknown process origin %d", origin)
 	}
-	// The user's own shell is not supervised. It bypasses the fence and the
-	// scrubbed environment already, it never becomes a managed job, and there
-	// is nobody to deliver its completion to but the person who typed it.
-	mailbox := ""
-	if origin == processOriginAgent {
-		if commandProcess.Err != nil {
-			return nil, fmt.Errorf("prepare bash: %w", commandProcess.Err)
-		}
-		mailbox = m.mailboxFor(id)
-		if err := os.MkdirAll(mailbox, 0o700); err != nil {
-			return nil, fmt.Errorf("create job mailbox: %w", err)
-		}
-		// Cy's own note in the mailbox, not the supervisor's: what the model
-		// asked for, rather than the argv that came of it. Without it a job
-		// picked up by a later run can be listed only as an id.
-		_ = writeJobFile(mailbox, jobCommandFile, []byte(command))
-		commandProcess = superviseCommand(m.jobLauncher, mailbox, commandProcess)
-	}
-	configureProcessGroup(commandProcess)
-	log := &jobBuffer{limit: m.logLimit}
-	commandProcess.Stdout = log
-	commandProcess.Stderr = log
-	if err := commandProcess.Start(); err != nil {
+	job, err := m.startJob(jobSpec{
+		command:       command,
+		process:       commandProcess,
+		timeout:       timeout,
+		supervise:     origin == processOriginAgent,
+		userInitiated: origin == processOriginUser,
+	})
+	if err != nil {
 		return nil, fmt.Errorf("start bash: %w", err)
 	}
-	job := &processJob{
-		id:            id,
-		command:       command,
-		mailbox:       mailbox,
-		cmd:           commandProcess,
-		log:           log,
-		done:          make(chan struct{}),
-		status:        jobRunning,
-		startedAt:     time.Now().UTC(),
-		userInitiated: origin == processOriginUser,
-	}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		_ = killProcessGroup(commandProcess)
-		_ = commandProcess.Wait()
-		return nil, errors.New("process manager closed while starting job")
-	}
-	m.jobs[id] = job
-	m.mu.Unlock()
-	go m.monitor(job, timeout)
 	return job, nil
 }
 
@@ -614,6 +664,11 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 	// leads, before it can write. That is why this overlays rather than
 	// replaces -- Cy's own account of a job it killed is the only one there is.
 	if result, ok := readJobResult(job.mailbox); ok {
+		// The one status the supervisor knows better than Cy does: from here
+		// the launcher exited, which looks like an ordinary failure.
+		if result.Status == jobNotStarted {
+			job.status = jobNotStarted
+		}
 		if result.ExitCode != nil {
 			job.exitCode = result.ExitCode
 		}
@@ -623,8 +678,13 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 		if !result.FinishedAt.IsZero() {
 			job.finishedAt = result.FinishedAt
 		}
-		if tail, ok := readJobOutput(job.mailbox); ok {
-			job.log.adopt(tail, result.OutputBytes)
+		// Not for a job whose two streams are kept apart: this process still
+		// holds the finer copy, and the merged file is for the process that
+		// does not.
+		if job.errLog == nil {
+			if tail, ok := readJobOutput(job.mailbox); ok {
+				job.log.adopt(tail, result.OutputBytes)
+			}
 		}
 	}
 	job.mu.Unlock()
@@ -884,9 +944,9 @@ func (m *processManager) processMeta(job *processJob, managed bool) processResul
 		meta.JobID = job.id
 	}
 	job.mu.Unlock()
-	meta.OutputBytes, meta.DiscardedBytes = job.log.stats()
+	meta.OutputBytes, meta.DiscardedBytes = job.stats()
 	if meta.Status != jobRunning && meta.Status != jobCompleted && meta.OutputBytes > 0 {
-		tail, _ := job.log.snapshot(processFailureTailSize)
+		tail, _ := job.snapshot(processFailureTailSize)
 		meta.FailureTail = strings.TrimSpace(string(tail))
 	}
 	return meta
@@ -948,6 +1008,27 @@ func (l *jobBuffer) adopt(data []byte, received int64) {
 		l.data = data
 	}
 	l.discarded = l.received - int64(len(l.data))
+}
+
+// snapshot is the job's output as one account of it. Two buffers become one
+// here, stdout then stderr, for the readers that have no reason to care; the
+// caller that asked for them apart holds the buffers and keeps them apart.
+func (j *processJob) snapshot(limit int) ([]byte, bool) {
+	out, truncated := j.log.snapshot(limit)
+	if j.errLog == nil {
+		return out, truncated
+	}
+	errOut, errTruncated := j.errLog.snapshot(limit)
+	return append(out, errOut...), truncated || errTruncated
+}
+
+func (j *processJob) stats() (stored, discarded int64) {
+	stored, discarded = j.log.stats()
+	if j.errLog != nil {
+		errStored, errDiscarded := j.errLog.stats()
+		stored, discarded = stored+errStored, discarded+errDiscarded
+	}
+	return stored, discarded
 }
 
 func (l *jobBuffer) stats() (stored, discarded int64) {

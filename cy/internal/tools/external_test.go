@@ -360,3 +360,46 @@ func TestExternalToolsRenderTheConfigurationForTheJournal(t *testing.T) {
 		t.Fatalf("default timeout = %q", configs[1].Timeout)
 	}
 }
+
+// A configured program is a managed job, not a second way of spawning
+// things. If it is, the supervisor's account of it is what Cy reports
+// -- and a launcher that lies is the only way to tell that apart from the wait
+// status Cy would have had anyway.
+func TestAConfiguredToolRunsAsAJobUnderTheSameSupervisor(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is unavailable")
+	}
+	launcher := filepath.Join(t.TempDir(), "launcher.sh")
+	script := "#!/bin/sh\nmailbox=$1; shift\n\"$@\"\nprintf '{\"status\":\"completed\",\"exit_code\":7}\\n' > \"$mailbox/result.json\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	manager, err := NewProcessManager(ProcessOptions{
+		Root: t.TempDir(), Home: home, SessionID: "session",
+		Sandbox: sandboxOff, JobLauncher: launcher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	tool := externalToolForTest(t, manager, `cat; printf 'to stderr' >&2`, ExternalTool{Effect: "read"})
+	result := runExternalToolForTest(t, tool, `{"question":"answered"}`)
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok || meta.ExitCode == nil || *meta.ExitCode != 7 {
+		t.Fatalf("meta = %#v, want the launcher's exit 7", result.Meta)
+	}
+	// Arguments still reach the program on stdin, two processes further down
+	// than they used to, and the two streams are still shown apart.
+	if !strings.Contains(result.Content, `{"question":"answered"}`) || !strings.Contains(result.Content, "stderr:\nto stderr") {
+		t.Fatalf("content = %q", result.Content)
+	}
+	// A synchronous call leaves nothing behind: nobody can ask about it again.
+	if entries, err := os.ReadDir(filepath.Join(home, "jobs", "session")); err == nil && len(entries) != 0 {
+		t.Fatalf("registry still holds %d jobs", len(entries))
+	}
+	if len(manager.jobs) != 0 {
+		t.Fatalf("manager still holds %d jobs", len(manager.jobs))
+	}
+}

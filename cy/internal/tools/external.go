@@ -270,11 +270,8 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		}
 
 		m.mu.Lock()
-		closed, sandbox := m.closed, m.sandbox
+		sandbox := m.sandbox
 		m.mu.Unlock()
-		if closed {
-			return golem.ToolResult{}, errors.New("process manager is closed")
-		}
 
 		// The same fence as Bash, deliberately: a program Cy spawns would
 		// otherwise inherit Cy's own reach, $CY_HOME and the journal included.
@@ -292,67 +289,62 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: %v", golem.ErrToolFatal, declaration.Name, err)
 		}
 		command.Env = appendExternalEnv(command.Env, declaration.Env)
-		configureProcessGroup(command)
-		stdout := &jobBuffer{limit: m.logLimit}
-		stderr := &jobBuffer{limit: m.logLimit}
-		command.Stdin = bytes.NewReader(arguments)
-		command.Stdout = stdout
-		command.Stderr = stderr
 
-		startedAt := time.Now()
-		if err := command.Start(); err != nil {
-			// Not a tool error. ENOENT, a bad interpreter line or a program
-			// that is not executable will fail identically however many times
-			// the model rephrases its arguments.
+		// A managed job like any other, so that a configured program gets the
+		// supervisor, the mailbox and the bounded output that a shell command
+		// has, rather than a second spawn-and-wait beside them.
+		// It differs in two ways only: its arguments arrive on stdin, and its
+		// two streams are kept apart because the model is shown them apart.
+		job, err := m.startJob(jobSpec{
+			command:   declaration.Name,
+			process:   command,
+			timeout:   timeout,
+			stdin:     bytes.NewReader(arguments),
+			stderr:    &jobBuffer{limit: m.logLimit},
+			supervise: true,
+		})
+		if err != nil {
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: start %s: %v", golem.ErrToolFatal, declaration.Name, program, err)
 		}
-		waitErr, timedOut, cancelled := awaitExternal(ctx, command, timeout)
-		duration := time.Since(startedAt)
-		if cancelled {
+		// Forgotten either way: the call is synchronous, so by the time this
+		// returns there is nothing left for anyone to ask about, and the
+		// mailbox goes with it.
+		defer m.forget(job)
+		select {
+		case <-job.done:
+		case <-ctx.Done():
+			_, _ = m.stop(context.Background(), job.id, "tool call cancelled")
 			return golem.ToolResult{}, ctx.Err()
 		}
 
-		out, outTruncated := stdout.snapshot(int(m.logLimit))
-		errOut, errTruncated := stderr.snapshot(int(m.logLimit))
+		job.mu.Lock()
+		status, exitCode, errText := job.status, job.exitCode, job.errText
+		duration := job.finishedAt.Sub(job.startedAt)
+		job.mu.Unlock()
+		// Not a tool error. ENOENT, a bad interpreter line or a program that is
+		// not executable will fail identically however many times the model
+		// rephrases its arguments.
+		if status == jobNotStarted {
+			return golem.ToolResult{}, fmt.Errorf("%w: %s: start %s: %s", golem.ErrToolFatal, declaration.Name, program, errText)
+		}
+		out, outTruncated := job.log.snapshot(int(m.logLimit))
+		errOut, errTruncated := job.errLog.snapshot(int(m.logLimit))
 		meta := ExternalToolMeta{
 			Tool:       declaration.Name,
 			Program:    program,
 			Command:    declaration.Command,
 			Workdir:    display,
 			Sandbox:    sandbox,
-			ExitCode:   processExitCode(waitErr),
+			ExitCode:   exitCode,
 			DurationMS: duration.Milliseconds(),
 			Truncated:  outTruncated || errTruncated,
-			TimedOut:   timedOut,
+			TimedOut:   status == jobTimedOut,
 		}
 		return golem.ToolResult{
 			Content: formatExternalResult(declaration.Name, string(out), string(errOut), meta, timeout),
 			Meta:    meta,
 		}, nil
 	}
-}
-
-// awaitExternal waits for the process, killing its group if the call is
-// cancelled or the tool outlives its timeout. It always waits for the process
-// to actually be gone, so no tool outlives the call that started it.
-func awaitExternal(ctx context.Context, command *exec.Cmd, timeout time.Duration) (waitErr error, timedOut, cancelled bool) {
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case waitErr = <-wait:
-		return waitErr, false, false
-	case <-timer.C:
-		timedOut = true
-	case <-ctx.Done():
-		cancelled = true
-	}
-	stopped := make(chan struct{})
-	go keepKillingProcessGroup(command, stopped)
-	waitErr = <-wait
-	close(stopped)
-	return waitErr, timedOut, cancelled
 }
 
 // externalCallArguments returns the JSON the model produced, which goes to the
