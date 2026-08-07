@@ -355,7 +355,7 @@ func (a *sessionAgent) SwitchProfile(value string) error {
 	if a.closed || eng == nil || processes == nil {
 		return errors.New("cy session runtime is closed")
 	}
-	tools, err := a.toolsForProfile(processes, profile)
+	tools, external, err := a.toolsForProfile(processes, profile)
 	if err != nil {
 		return err
 	}
@@ -364,7 +364,7 @@ func (a *sessionAgent) SwitchProfile(value string) error {
 			return fmt.Errorf("remember selected profile: %w", err)
 		}
 	}
-	if err := eng.ReconfigureTools(tools); err != nil {
+	if err := eng.ReconfigureTools(tools, external); err != nil {
 		return err
 	}
 	a.cfg.CapabilityProfile = profile
@@ -425,23 +425,27 @@ func (a *sessionAgent) reloadTools() error {
 	if a.closed || a.engine == nil || a.processes == nil {
 		return errors.New("cy session runtime is closed")
 	}
-	tools, err := a.toolsForProfile(a.processes, a.cfg.CapabilityProfile)
+	tools, external, err := a.toolsForProfile(a.processes, a.cfg.CapabilityProfile)
 	if err != nil {
 		return err
 	}
-	if err := a.engine.ReconfigureTools(tools); err != nil {
+	if err := a.engine.ReconfigureTools(tools, external); err != nil {
 		return err
 	}
 	a.refreshStatusLocked()
 	return nil
 }
 
-func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, profile string) ([]golem.Tool, error) {
+// toolsForProfile assembles the catalog this profile exposes, and beside it the
+// configured tools that survived the filter. Both, because the journal has to
+// say what the model was offered and how the calls it made would run, and the
+// two answers have to describe the same set.
+func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, profile string) ([]golem.Tool, []session.ExternalToolConfig, error) {
 	tools := toolruntime.FilterWorkspaceToolsForProfile(a.baseTools, profile)
 	hnClient := hackernews.NewClient()
 	fetchBackends, err := a.webFetchBackends(hnClient)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tools = append(tools, webfetch.NewTool(fetchBackends...))
 	credentials := make([]websearch.Credential, 0, len(serviceCatalog))
@@ -451,7 +455,7 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 		}
 		token, _, err := credentialForProvider(a.state, service.name)
 		if err != nil {
-			return nil, fmt.Errorf("load %s credential: %w", service.name, err)
+			return nil, nil, fmt.Errorf("load %s credential: %w", service.name, err)
 		}
 		if token != "" {
 			credentials = append(credentials, websearch.Credential{Provider: service.name, Token: token})
@@ -459,24 +463,49 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 	}
 	searchTool, available, err := websearch.NewTool(credentials)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if available {
 		tools = append(tools, searchTool)
 	}
+	var configured []session.ExternalToolConfig
 	if processes != nil {
 		tools = append(tools, processes.Tools()...)
-		external, err := a.externalTools(processes, tools)
+		external, configs, err := a.externalTools(processes, tools)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tools = append(tools, external...)
+		configured = configs
 	}
 	tools = toolruntime.FilterForProfile(tools, profile)
 	if _, err := golem.NewToolSet(tools); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return tools, nil
+	return tools, keepConfiguredIn(configured, tools), nil
+}
+
+// keepConfiguredIn drops the descriptions of tools the profile filtered out.
+// A read-only profile hides a tool declared `write`, and recording how it would
+// have run reads as though it were on offer.
+func keepConfiguredIn(configured []session.ExternalToolConfig, tools []golem.Tool) []session.ExternalToolConfig {
+	if len(configured) == 0 {
+		return nil
+	}
+	offered := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		offered[tool.Definition.Function.Name] = true
+	}
+	kept := make([]session.ExternalToolConfig, 0, len(configured))
+	for _, config := range configured {
+		if offered[config.Name] {
+			kept = append(kept, config)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
 }
 
 // externalTools builds the tools declared in configuration, refusing any name
@@ -486,9 +515,9 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 // Checked against the whole built-in catalog rather than against what this
 // profile exposes, so a declaration is not accepted under one profile and
 // rejected under another.
-func (a *sessionAgent) externalTools(processes *toolruntime.ProcessManager, assembled []golem.Tool) ([]golem.Tool, error) {
+func (a *sessionAgent) externalTools(processes *toolruntime.ProcessManager, assembled []golem.Tool) ([]golem.Tool, []session.ExternalToolConfig, error) {
 	if len(a.cfg.ExternalTools) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	taken := make(map[string]bool, len(assembled)+len(a.baseTools))
 	for _, tool := range append(append([]golem.Tool(nil), a.baseTools...), assembled...) {
@@ -496,14 +525,14 @@ func (a *sessionAgent) externalTools(processes *toolruntime.ProcessManager, asse
 	}
 	for _, declaration := range a.cfg.ExternalTools {
 		if taken[declaration.Name] {
-			return nil, asConfigError(fmt.Errorf("tool %q in %s is already a built-in tool; give it another name", declaration.Name, a.cfg.ToolsFile))
+			return nil, nil, asConfigError(fmt.Errorf("tool %q in %s is already a built-in tool; give it another name", declaration.Name, a.cfg.ToolsFile))
 		}
 	}
-	external, err := processes.ExternalTools(a.cfg.ExternalTools)
+	external, configs, err := processes.ExternalTools(a.cfg.ExternalTools)
 	if err != nil {
-		return nil, asConfigError(fmt.Errorf("%s: %w", a.cfg.ToolsFile, err))
+		return nil, nil, asConfigError(fmt.Errorf("%s: %w", a.cfg.ToolsFile, err))
 	}
-	return external, nil
+	return external, configs, nil
 }
 
 func (a *sessionAgent) webFetchBackends(hnClient *hackernews.Client) ([]webfetch.Backend, error) {
@@ -544,7 +573,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		_ = processes.Close()
 		return nil, nil, err
 	}
-	tools, err := a.toolsForProfile(processes, profile)
+	tools, external, err := a.toolsForProfile(processes, profile)
 	if err != nil {
 		_ = processes.Close()
 		return nil, nil, err
@@ -560,6 +589,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		ContextWindow:          spec.ContextWindow,
 		ContextEstimated:       spec.Estimated,
 		Tools:                  tools,
+		ExternalTools:          external,
 		Sandbox:                cfg.Security.Journal(cfg.SandboxPolicy),
 		MaxToolIterations:      cfg.MaxToolIterations,
 		RequestPolicy:          requestPolicyFor(cfg),

@@ -84,6 +84,39 @@ type SessionConfigured struct {
 	Tools              []llm.Tool      `json:"tools,omitempty"`
 	Sandbox            SandboxState    `json:"sandbox"`
 	Settings           SessionSettings `json:"settings"`
+	// ExternalTools describes the ones among Tools that came from
+	// configuration. Same set, seen from the other side: Tools is what the
+	// model was shown, this is what those calls actually ran.
+	ExternalTools []ExternalToolConfig `json:"external_tools,omitempty"`
+}
+
+// ExternalToolConfig is one configured tool as the run resolved it, not as the
+// file wrote it: the program after the PATH lookup, the timeout after the
+// default and the ceiling. Recorded because a tool declared outside the binary
+// is the one thing a reader of the journal cannot look up in the source -- the
+// same session file, replayed against a different tools file, is a different
+// run, and nothing else in the journal would say so.
+//
+// The declared schema is not repeated here; it is already on the matching entry
+// in Tools, which is what the model was shown.
+//
+// Environment names without their values, unlike everything else in
+// SessionConfigured. The rest is what the model was handed and has to be
+// recorded verbatim; a variable set for a tool is neither -- it is a way to
+// pass the tool a token, and writing it here would put a credential in a file
+// the model never saw it in. The names are kept because a tool that behaves
+// differently on two machines usually differs by exactly one of them.
+type ExternalToolConfig struct {
+	Name string `json:"name"`
+	// Effect decides whether calls run concurrently and whether a restricted
+	// profile exposes the tool, so it changes behaviour that nothing else here
+	// would explain.
+	Effect   string   `json:"effect"`
+	Program  string   `json:"program"`
+	Command  []string `json:"command"`
+	Workdir  string   `json:"workdir,omitempty"`
+	Timeout  string   `json:"timeout,omitempty"`
+	EnvNames []string `json:"env_names,omitempty"`
 }
 
 // SessionSettings are the operational bounds the session runs under: where the

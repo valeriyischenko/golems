@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +111,7 @@ func TestLoadExternalToolsRejectsBadDeclarations(t *testing.T) {
 // into an unattended run.
 func TestExternalToolsRefuseAProgramThatIsNotThere(t *testing.T) {
 	manager := processManagerForTest(t)
-	_, err := manager.ExternalTools([]ExternalTool{{
+	_, _, err := manager.ExternalTools([]ExternalTool{{
 		Name: "missing", Description: "d", Effect: "read",
 		Command: []string{"cy-no-such-program-anywhere"},
 	}})
@@ -191,7 +193,7 @@ func TestExternalToolThatCannotStartEndsTheRun(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := manager.ExternalTools([]ExternalTool{{
+	tools, _, err := manager.ExternalTools([]ExternalTool{{
 		Name: "vanishing", Description: "d", Effect: "read", Command: []string{script},
 	}})
 	if err != nil {
@@ -249,7 +251,7 @@ func runFencedExternalProbe(t *testing.T, workspace, home, script string) string
 	if err := declaration.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := manager.ExternalTools([]ExternalTool{declaration})
+	tools, _, err := manager.ExternalTools([]ExternalTool{declaration})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +292,7 @@ func externalToolForTest(t *testing.T, manager *processManager, script string, d
 	if err := declaration.normalize(); err != nil {
 		t.Fatal(err)
 	}
-	tools, buildErr := manager.ExternalTools([]ExternalTool{declaration})
+	tools, _, buildErr := manager.ExternalTools([]ExternalTool{declaration})
 	if buildErr != nil {
 		t.Fatal(buildErr)
 	}
@@ -304,4 +306,57 @@ func runExternalToolForTest(t *testing.T, tool golem.Tool, arguments string) gol
 		t.Fatalf("tool error = %v", err)
 	}
 	return result
+}
+
+// The journal has to describe a configured tool as it will actually run, since
+// the source cannot: the program after the PATH lookup, the timeout after the
+// default. Values of declared variables are the deliberate omission -- a
+// variable set for a tool is how a tool is handed a token.
+func TestExternalToolsRenderTheConfigurationForTheJournal(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	manager := processManagerForTest(t)
+	declarations := loadExternalToolsForTest(t, `{"tools":[
+	  {"name":"notes","description":"search notes","effect":"read",
+	   "command":["bash","-c","cat"],"workdir":"","timeout":45,
+	   "env":{"NOTES_TOKEN":"s3cret","NOTES_INDEX":"/idx"}},
+	  {"name":"plain","description":"no frills","effect":"write",
+	   "command":["bash","-c","true"]}
+	]}`)
+	_, configs, err := manager.ExternalTools(declarations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("configs = %d, want 2", len(configs))
+	}
+	notes := configs[0]
+	if notes.Name != "notes" || notes.Effect != "read" {
+		t.Fatalf("notes = %+v", notes)
+	}
+	if notes.Program != bash {
+		t.Fatalf("program = %q, want the resolved %q", notes.Program, bash)
+	}
+	if !slices.Equal(notes.Command, []string{"bash", "-c", "cat"}) {
+		t.Fatalf("command = %v", notes.Command)
+	}
+	if notes.Timeout != "45s" {
+		t.Fatalf("timeout = %q, want the declared 45s", notes.Timeout)
+	}
+	// Sorted, so two runs of the same file render identically.
+	if !slices.Equal(notes.EnvNames, []string{"NOTES_INDEX", "NOTES_TOKEN"}) {
+		t.Fatalf("env names = %v", notes.EnvNames)
+	}
+	if encoded, err := json.Marshal(configs); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(encoded), "s3cret") {
+		t.Fatalf("a declared variable's value reached the journal: %s", encoded)
+	}
+	// A tool that declared none of the optional fields renders the resolved
+	// default rather than nothing, which is the whole point of recording it.
+	if configs[1].Timeout != defaultExternalTimeout.String() {
+		t.Fatalf("default timeout = %q", configs[1].Timeout)
+	}
 }

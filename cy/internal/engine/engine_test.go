@@ -721,7 +721,7 @@ func TestEngineRecordsConfigurationAndEveryChangeToIt(t *testing.T) {
 		t.Fatalf("session_configured records after an unchanged rebuild = %d, want 1", len(again))
 	}
 
-	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}); err != nil {
+	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := eng.ReconfigureSandbox(session.SandboxState{Policy: "on", Effective: "on", Backend: "seatbelt"}); err != nil {
@@ -740,7 +740,7 @@ func TestEngineRecordsConfigurationAndEveryChangeToIt(t *testing.T) {
 
 	// Reapplying the same catalog and the same sandbox says nothing, which is the
 	// part the engine now has to get right from memory rather than from the file.
-	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}); err != nil {
+	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := eng.ReconfigureSandbox(session.SandboxState{Policy: "on", Effective: "on", Backend: "seatbelt"}); err != nil {
@@ -1173,4 +1173,56 @@ func countBoundaryEvents(t *testing.T, s *session.Session) int {
 		}
 	}
 	return count
+}
+
+// The catalog says a tool exists; only this says what running it means. A
+// session file read against a different tools file is a different run, and
+// without this nothing in the journal would say so.
+func TestEngineRecordsHowConfiguredToolsRun(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := golem.FunctionTool("notes", "search notes", jsonschema.Obj().NoAdditionalProperties(),
+		func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+			return golem.ToolResult{Content: "contents"}, nil
+		})
+	configured := []session.ExternalToolConfig{{
+		Name: "notes", Effect: "read", Program: "/usr/bin/python3",
+		Command: []string{"python3", "tools/notes.py"}, Timeout: "45s",
+		EnvNames: []string{"NOTES_INDEX"},
+	}}
+	eng, err := New(Config{
+		Model:         &scriptedModel{},
+		Session:       s,
+		SystemPrompt:  "system",
+		Tools:         []golem.Tool{notes},
+		ExternalTools: configured,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := configurations(t, s)
+	if len(first) != 1 {
+		t.Fatalf("session_configured records = %d, want 1", len(first))
+	}
+	if len(first[0].ExternalTools) != 1 || first[0].ExternalTools[0].Program != "/usr/bin/python3" {
+		t.Fatalf("recorded external tools = %#v", first[0].ExternalTools)
+	}
+
+	// The catalog is unchanged, so only the description of how it runs differs.
+	// Without that being part of what is compared, the change would be dropped
+	// as a no-op and the journal would keep describing the old program.
+	moved := []session.ExternalToolConfig{configured[0]}
+	moved[0].Program = "/opt/python/bin/python3"
+	if err := eng.ReconfigureTools([]golem.Tool{notes}, moved); err != nil {
+		t.Fatal(err)
+	}
+	recorded := configurations(t, s)
+	if len(recorded) != 2 {
+		t.Fatalf("session_configured records after a program change = %d, want 2", len(recorded))
+	}
+	if recorded[1].ExternalTools[0].Program != "/opt/python/bin/python3" {
+		t.Fatalf("re-recorded external tools = %#v", recorded[1].ExternalTools)
+	}
 }

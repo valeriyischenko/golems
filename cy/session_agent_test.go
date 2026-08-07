@@ -222,7 +222,7 @@ func TestConfiguredToolsIncludeFetchAndCredentialedSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := &sessionAgent{state: store}
-	tools, err := agent.toolsForProfile(nil, "read-only")
+	tools, _, err := agent.toolsForProfile(nil, "read-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestConfiguredToolsIncludeFetchAndCredentialedSearch(t *testing.T) {
 	if err := store.SetAPIKey("tavily", "tvly-test-key"); err != nil {
 		t.Fatal(err)
 	}
-	tools, err = agent.toolsForProfile(nil, "read-only")
+	tools, _, err = agent.toolsForProfile(nil, "read-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,4 +704,57 @@ func TestSessionAgentListsAndResumesOnlyCurrentWorkspace(t *testing.T) {
 	if _, err := agent.ResumeSession(otherID); err == nil || !strings.Contains(err.Error(), "current workspace") {
 		t.Fatalf("cross-workspace resume error = %v", err)
 	}
+}
+
+// The catalog and the description of how it runs have to name the same tools.
+// A read-only profile hides a tool declared `write`, and a journal that still
+// described that tool's command would say it was on offer when it was not.
+func TestConfiguredToolDescriptionsFollowTheProfileFilter(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable")
+	}
+	t.Setenv("TAVILY_API_KEY", "")
+	t.Setenv("EXA_API_KEY", "")
+	t.Setenv("FIRECRAWL_API_KEY", "")
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes, err := toolruntime.NewProcessManager(t.TempDir(), t.TempDir(), "off", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = processes.Close() })
+	agent := &sessionAgent{state: store, cfg: Config{ExternalTools: []toolruntime.ExternalTool{
+		{Name: "notes", Description: "read notes", Effect: "read", Command: []string{bash, "-c", "true"}},
+		{Name: "publish", Description: "write notes", Effect: "write", Command: []string{bash, "-c", "true"}},
+	}}}
+
+	_, configured, err := agent.toolsForProfile(processes, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredToolNames(configured); strings.Join(got, ",") != "notes,publish" {
+		t.Fatalf("configured under full = %v", got)
+	}
+
+	tools, configured, err := agent.toolsForProfile(processes, "read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredToolNames(configured); strings.Join(got, ",") != "notes" {
+		t.Fatalf("configured under read-only = %v", got)
+	}
+	if names := toolNames(tools); strings.Contains(strings.Join(names, ","), "publish") {
+		t.Fatalf("read-only still offers publish: %v", names)
+	}
+}
+
+func configuredToolNames(configured []session.ExternalToolConfig) []string {
+	names := make([]string, 0, len(configured))
+	for _, config := range configured {
+		names = append(names, config.Name)
+	}
+	return names
 }

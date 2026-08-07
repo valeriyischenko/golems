@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/levmv/golems/cy/internal/session"
 	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/llm"
@@ -155,6 +156,24 @@ func (t ExternalTool) timeout() time.Duration {
 	return min(time.Duration(t.Timeout)*time.Second, maxExternalTimeout)
 }
 
+// rendered is the declaration as this run resolved it, for the journal. Values
+// of declared variables are deliberately left behind; see ExternalToolConfig.
+func (t ExternalTool) rendered(program string) session.ExternalToolConfig {
+	config := session.ExternalToolConfig{
+		Name:    t.Name,
+		Effect:  t.Effect,
+		Program: program,
+		Command: t.Command,
+		Workdir: t.Workdir,
+		Timeout: t.timeout().String(),
+	}
+	for name := range t.Env {
+		config.EnvNames = append(config.EnvNames, name)
+	}
+	slices.Sort(config.EnvNames)
+	return config
+}
+
 // ExternalToolMeta is what the journal keeps about one call: enough to run the
 // same thing again by hand. The call's arguments are not repeated here because
 // they are already on the tool_call record this result answers.
@@ -170,18 +189,22 @@ type ExternalToolMeta struct {
 	TimedOut   bool     `json:"timed_out,omitempty"`
 }
 
-// ExternalTools turns declarations into runnable tools.
+// ExternalTools turns declarations into runnable tools, and returns beside them
+// what the journal should say about how those tools will run.
 //
 // Programs are resolved here rather than at call time, for two reasons. A name
 // that is not on PATH is a mistake in configuration, and the run should end
 // before the model is ever told the tool exists. And it is what the fence
-// needs anyway: it execs a path and never searches PATH itself.
-func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Tool, error) {
+// needs anyway: it execs a path and never searches PATH itself. Resolving once
+// is also what makes the record true for the whole session rather than for the
+// moment it was written.
+func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Tool, []session.ExternalToolConfig, error) {
 	tools := make([]golem.Tool, 0, len(declarations))
+	configs := make([]session.ExternalToolConfig, 0, len(declarations))
 	for _, declaration := range declarations {
 		program, err := m.resolveExternalProgram(declaration.Command[0])
 		if err != nil {
-			return nil, fmt.Errorf("tool %s: %w", declaration.Name, err)
+			return nil, nil, fmt.Errorf("tool %s: %w", declaration.Name, err)
 		}
 		tools = append(tools, golem.FunctionToolWithEffect(
 			golem.ToolEffect(declaration.Effect),
@@ -190,8 +213,9 @@ func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Too
 			declaration.Parameters,
 			m.externalRunner(declaration, program),
 		))
+		configs = append(configs, declaration.rendered(program))
 	}
-	return tools, nil
+	return tools, configs, nil
 }
 
 // resolveExternalProgram finds the executable a declaration names. A bare name

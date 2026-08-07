@@ -37,7 +37,12 @@ type Config struct {
 	ContextWindow      int
 	ContextEstimated   bool
 	Tools              []golem.Tool
-	Sandbox            session.SandboxState
+	// ExternalTools describes the configured tools among Tools. The engine
+	// makes no use of it and does not derive it: it cannot, since a tool is a
+	// name and a function by the time it arrives here, and where that function
+	// came from is knowledge the caller has.
+	ExternalTools []session.ExternalToolConfig
+	Sandbox       session.SandboxState
 	// MaxToolIterations caps model-to-tool cycles in one turn. Zero uses the
 	// default fuse; a negative value removes it, which only an unattended caller
 	// that has said so deliberately should ask for.
@@ -76,6 +81,7 @@ type Engine struct {
 	systemPrompt           string
 	instructionPrompts     []string
 	tools                  []llm.Tool
+	externalTools          []session.ExternalToolConfig
 	toolSet                *golem.ToolSet
 	sandbox                session.SandboxState
 	maxToolIterations      int
@@ -125,6 +131,7 @@ func New(cfg Config) (*Engine, error) {
 		modelURI:      strings.TrimSpace(cfg.ModelURI),
 		systemPrompt:  systemPrompt,
 		tools:         toolSet.Definitions(),
+		externalTools: cfg.ExternalTools,
 		toolSet:       toolSet,
 		sandbox:       cfg.Sandbox,
 		requestPolicy: cfg.RequestPolicy,
@@ -179,6 +186,7 @@ func (e *Engine) recordConfiguration() error {
 		SystemPrompt:       e.systemPrompt,
 		InstructionPrompts: e.instructionPrompts,
 		Tools:              e.tools,
+		ExternalTools:      e.externalTools,
 		Sandbox:            e.sandbox,
 		Settings:           e.settings(),
 	}
@@ -243,7 +251,7 @@ func (e *Engine) ReconfigureModel(model golem.Model, modelURI string, contextWin
 // ReconfigureTools replaces the model-visible tool catalog and executors at a
 // turn boundary. The process runtime itself remains alive, so changing a
 // capability profile does not kill detached jobs.
-func (e *Engine) ReconfigureTools(tools []golem.Tool) error {
+func (e *Engine) ReconfigureTools(tools []golem.Tool, external []session.ExternalToolConfig) error {
 	toolSet, err := golem.NewToolSet(tools)
 	if err != nil {
 		return fmt.Errorf("cy engine: %w", err)
@@ -252,6 +260,7 @@ func (e *Engine) ReconfigureTools(tools []golem.Tool) error {
 	e.turnMu.Lock()
 	defer e.turnMu.Unlock()
 	e.tools = toolSet.Definitions()
+	e.externalTools = external
 	e.toolSet = toolSet
 	return e.recordConfiguration()
 }
