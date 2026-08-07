@@ -737,6 +737,18 @@ func TestEngineRecordsConfigurationAndEveryChangeToIt(t *testing.T) {
 		t.Fatalf("sandbox change recorded as %#v", recorded[2])
 	}
 
+	// Reapplying the same catalog and the same sandbox says nothing, which is the
+	// part the engine now has to get right from memory rather than from the file.
+	if err := eng.ReconfigureTools([]golem.Tool{newTool("read"), newTool("write")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ReconfigureSandbox(session.SandboxState{Policy: "on", Effective: "on", Backend: "seatbelt"}); err != nil {
+		t.Fatal(err)
+	}
+	if still := configurations(t, s); len(still) != 3 {
+		t.Fatalf("session_configured records after two no-op changes = %d, want 3", len(still))
+	}
+
 	state, err := s.Replay()
 	if err != nil {
 		t.Fatal(err)

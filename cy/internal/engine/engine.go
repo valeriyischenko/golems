@@ -75,9 +75,17 @@ type Engine struct {
 	requestPolicy      golem.RequestPolicy
 	boundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	sanitize           func(string) string
-	baseURL            string
-	contextWindow      int
-	contextEstimated   bool
+	// recordedConfig is the last configuration written to the journal, or what a
+	// resume found there, in the encoding it was recorded in. Held rather than
+	// replayed because a replay rebuilds the entire conversation to answer one
+	// question, and the answer is something this engine already knows: nothing else
+	// writes the journal while it is open. Kept encoded so that it cannot be a view
+	// of live state -- the slices it would otherwise share are the ones a
+	// reconfigure replaces.
+	recordedConfig   []byte
+	baseURL          string
+	contextWindow    int
+	contextEstimated bool
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -130,6 +138,19 @@ func New(cfg Config) (*Engine, error) {
 			engine.instructionPrompts = append(engine.instructionPrompts, prompt)
 		}
 	}
+	// The one replay this needs: on a resume the journal already holds a
+	// configuration, and it is the thing the first record has to be compared
+	// against. From here on the engine is the only writer, so it tracks what it
+	// wrote rather than reading the file back.
+	state, err := cfg.Session.Replay()
+	if err != nil {
+		return nil, fmt.Errorf("cy engine: %w", err)
+	}
+	if state.Configured != nil {
+		if engine.recordedConfig, err = json.Marshal(state.Configured); err != nil {
+			return nil, fmt.Errorf("cy engine: %w", err)
+		}
+	}
 	if err := engine.recordConfiguration(); err != nil {
 		return nil, fmt.Errorf("cy engine: record session configuration: %w", err)
 	}
@@ -137,7 +158,7 @@ func New(cfg Config) (*Engine, error) {
 }
 
 // recordConfiguration writes what the model is working with to the journal,
-// unless the journal already says exactly that.
+// unless the last thing written already says exactly that.
 //
 // Skipping the identical write is what makes this cheap enough to call from
 // every place that can change the configuration, including construction: a
@@ -152,16 +173,22 @@ func (e *Engine) recordConfiguration() error {
 		Sandbox:            e.sandbox,
 		Settings:           e.settings(),
 	}
-	state, err := e.session.Replay()
+	// Compared through the encoding both sides are recorded in, rather than field
+	// by field. What a resume found has been through a decode and what this engine
+	// built has not, so a structural comparison would have to know which of the
+	// differences that introduces are meaningless.
+	encoded, err := json.Marshal(configured)
 	if err != nil {
 		return err
 	}
-	unchanged, err := sameConfiguration(state.Configured, configured)
-	if err != nil || unchanged {
+	if bytes.Equal(encoded, e.recordedConfig) {
+		return nil
+	}
+	if _, err := e.session.Append(session.RecordSessionConfigured, configured); err != nil {
 		return err
 	}
-	_, err = e.session.Append(session.RecordSessionConfigured, configured)
-	return err
+	e.recordedConfig = encoded
+	return nil
 }
 
 // settings reports the bounds as they apply rather than as they were asked for:
@@ -183,25 +210,6 @@ func (e *Engine) settings() session.SessionSettings {
 		settings.StreamIdleTimeout = e.requestPolicy.StreamIdleTimeout.String()
 	}
 	return settings
-}
-
-// sameConfiguration compares through the encoding both sides are recorded in,
-// rather than field by field. The recorded value has been through a decode and
-// the live one has not, so a structural comparison would have to know which of
-// the differences that introduces are meaningless.
-func sameConfiguration(recorded *session.SessionConfigured, current session.SessionConfigured) (bool, error) {
-	if recorded == nil {
-		return false, nil
-	}
-	was, err := json.Marshal(recorded)
-	if err != nil {
-		return false, err
-	}
-	now, err := json.Marshal(current)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(was, now), nil
 }
 
 func (e *Engine) ReconfigureModel(model golem.Model, modelURI string, contextWindow int, contextEstimated bool) error {
