@@ -36,6 +36,7 @@ func TestExitCodeForClassifiesFailures(t *testing.T) {
 		{"provider", &llm.Error{StatusCode: 503, Provider: "openai", Message: "unavailable"}, exitProvider},
 		{"provider wrapped", fmt.Errorf("turn failed: %w", &llm.Error{StatusCode: 500, Provider: "openai"}), exitProvider},
 		{"stalled stream", fmt.Errorf("%w after 5m0s", golem.ErrStreamIdle), exitProvider},
+		{"exhausted request budget", fmt.Errorf("%w after 15m0s", golem.ErrRequestBudget), exitProvider},
 		{"interrupted", fmt.Errorf("run: %w", context.Canceled), exitInterrupted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

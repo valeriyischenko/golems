@@ -64,13 +64,13 @@ func exitCodeFor(err error) int {
 	if errors.As(err, &providerErr) {
 		return exitProvider
 	}
-	// A stalled stream is the provider not answering, in the shape that matters
-	// most to an unattended caller: the endpoint accepted the connection and then
-	// produced nothing. It is raised above the provider layer, so it carries no
-	// *llm.Error and would otherwise read as an unclassified failure -- the
-	// opposite classification from a refused connection, for the same dead
-	// endpoint.
-	if errors.Is(err, golem.ErrStreamIdle) {
+	// A stalled stream, and a request that spent its whole budget without an
+	// answer, are the provider not answering in the shape that matters most to an
+	// unattended caller: the endpoint accepted the connection and then produced
+	// nothing. Both are raised above the provider layer, so they carry no
+	// *llm.Error and would otherwise read as unclassified failures -- the opposite
+	// classification from a refused connection, for the same dead endpoint.
+	if errors.Is(err, golem.ErrStreamIdle) || errors.Is(err, golem.ErrRequestBudget) {
 		return exitProvider
 	}
 	return exitFailure

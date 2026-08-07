@@ -96,8 +96,11 @@ func normalizeMaxToolIterations(value string) (int, error) {
 // Neither of them accepts "unlimited", unlike the tool fuse. Cy asks for
 // unlimited retries and lets time be the limit, so a budget of zero is not a
 // generous setting but an invalid one -- golem refuses the combination outright.
-// The idle timeout is the only thing bounding an attempt that has connected and
-// gone quiet, which is the failure an unattended run most needs to survive.
+// A caller who wants the bound out of the way raises it rather than removes it.
+// The idle timeout is the tighter of the two on an attempt that has connected
+// and gone quiet, which is the failure an unattended run most needs to survive;
+// the budget is the outer bound, and it is the only one on a request that is not
+// streamed.
 func normalizePositiveDuration(value, setting string) (time.Duration, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

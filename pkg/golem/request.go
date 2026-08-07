@@ -17,10 +17,17 @@ import (
 // ended or the request policy has exhausted its limits.
 var ErrStreamIdle = errors.New("model stream idle timeout")
 
+// ErrRequestBudget is returned when an attempt is still running at the end of
+// the request's RetryBudget. It is the budget doing its job, so it is not
+// retryable: by definition there is nothing left to retry within.
+var ErrRequestBudget = errors.New("model request budget exhausted")
+
 // RequestPolicy bounds retries for one logical model request. MaxRetries is the
 // number of retries after the first attempt; a negative value means unlimited
-// retries and requires a positive RetryBudget and BaseDelay. A zero
-// StreamIdleTimeout leaves stream reads unbounded by this layer.
+// retries and requires a positive RetryBudget and BaseDelay. RetryBudget is the
+// wall-clock bound on the whole request, attempts included, so a single attempt
+// that never returns cannot outlive it. A zero StreamIdleTimeout leaves stream
+// reads unbounded by this layer.
 type RequestPolicy struct {
 	MaxRetries        int
 	RetryBudget       time.Duration
@@ -99,11 +106,17 @@ func (r *Requester) Request(ctx context.Context, step int, request llm.Request, 
 			}
 		}
 
-		response, provisional, hadProvisional, err := requestModelOnce(ctx, r.model, request, stream, emit, r.policy.StreamIdleTimeout)
+		attemptCtx, endAttempt := r.attemptContext(ctx, startedAt)
+		response, provisional, hadProvisional, err := requestModelOnce(attemptCtx, r.model, request, stream, emit, r.policy.StreamIdleTimeout)
 		response, err = validateModelResponse(response, err)
+		endAttempt()
 		if err == nil {
 			return response, nil
 		}
+		// The budget ran out inside the attempt rather than between attempts. Say
+		// so: what the caller gets otherwise is a bare deadline error that reads
+		// like a cancellation, from a deadline it never set.
+		err = r.nameBudgetExhaustion(ctx, attemptCtx, err)
 
 		failure := RequestFailure{Step: step, Attempt: attempt, Err: err, ProvisionalText: provisional, HadProvisionalOutput: hadProvisional}
 		if r.hooks.AttemptFailed != nil {
@@ -128,7 +141,7 @@ func (r *Requester) Request(ctx context.Context, step int, request llm.Request, 
 			}
 		}
 
-		if !llm.IsRetryable(err) || !r.retryAllowed(attempt, startedAt) {
+		if errors.Is(err, ErrRequestBudget) || !llm.IsRetryable(err) || !r.retryAllowed(attempt, startedAt) {
 			return nil, err
 		}
 		delay := r.retryDelay(err, attempt)
@@ -164,6 +177,28 @@ func formatRetryCause(err error) string {
 		}
 	}
 	return err.Error()
+}
+
+// attemptContext gives one attempt whatever is left of the request's budget.
+// Without it the budget bounds only the gaps between attempts, so an endpoint
+// that accepts a request and then holds it open is unbounded by this layer on
+// the streamed path (StreamIdleTimeout covers that one) and unbounded entirely
+// on the non-streamed path, whatever the caller configured.
+func (r *Requester) attemptContext(ctx context.Context, startedAt time.Time) (context.Context, context.CancelFunc) {
+	if r.policy.RetryBudget <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, startedAt.Add(r.policy.RetryBudget))
+}
+
+// nameBudgetExhaustion distinguishes our deadline from the caller's. Only the
+// attempt context being done makes it ours; if the caller's context ended too,
+// that is a cancellation and stays one.
+func (r *Requester) nameBudgetExhaustion(ctx, attemptCtx context.Context, err error) error {
+	if !errors.Is(attemptCtx.Err(), context.DeadlineExceeded) || ctx.Err() != nil {
+		return err
+	}
+	return fmt.Errorf("%w after %s", ErrRequestBudget, r.policy.RetryBudget)
 }
 
 func (r *Requester) retryAllowed(attempt int, startedAt time.Time) bool {

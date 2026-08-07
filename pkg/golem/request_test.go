@@ -233,3 +233,60 @@ func TestRequesterRejectsUnsafeUnlimitedRetries(t *testing.T) {
 		})
 	}
 }
+
+// blockingModel holds every request open until its context ends, which is the
+// endpoint that accepts a connection and then does nothing with it.
+type blockingModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *blockingModel) Chat(ctx context.Context, _ llm.Request) (*llm.Response, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *blockingModel) Stream(ctx context.Context, request llm.Request) (llm.Stream, error) {
+	_, err := m.Chat(ctx, request)
+	return nil, err
+}
+
+// The non-streamed path has no idle timeout to fall back on, so before the
+// budget bounded the attempt itself nothing here ended short of the transport's
+// own timeout. Compaction takes this path.
+func TestRequesterBudgetBoundsAnAttemptThatNeverReturns(t *testing.T) {
+	model := &blockingModel{}
+	requester, err := NewRequester(RequesterConfig{Model: model, Policy: RequestPolicy{MaxRetries: 3, RetryBudget: 50 * time.Millisecond, BaseDelay: time.Millisecond}})
+	if err != nil {
+		t.Fatalf("NewRequester() error = %v", err)
+	}
+	if _, err := requester.Request(context.Background(), 1, llm.Request{}, false, nil); !errors.Is(err, ErrRequestBudget) {
+		t.Fatalf("Request() error = %v, want %v", err, ErrRequestBudget)
+	}
+	if model.calls != 1 {
+		t.Fatalf("calls = %d, want the budget spent on one attempt and no retry after it", model.calls)
+	}
+}
+
+// The caller's own cancellation must not be reported as our budget running out:
+// one means stop, the other means come back later.
+func TestRequesterKeepsACallerCancellationDistinctFromTheBudget(t *testing.T) {
+	model := &blockingModel{}
+	requester, err := NewRequester(RequesterConfig{Model: model, Policy: RequestPolicy{MaxRetries: 3, RetryBudget: time.Hour, BaseDelay: time.Millisecond}})
+	if err != nil {
+		t.Fatalf("NewRequester() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, err = requester.Request(ctx, 1, llm.Request{}, false, nil)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrRequestBudget) {
+		t.Fatalf("Request() error = %v, want a cancellation", err)
+	}
+	cancel()
+}
