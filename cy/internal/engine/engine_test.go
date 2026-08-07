@@ -1108,6 +1108,40 @@ func TestEngineRecordsTheBoundsARunAppliesRatherThanTheOnesAsked(t *testing.T) {
 	}
 }
 
+// Whether the model could start work that outlives a tool call changes the
+// catalog it was offered, not just a bound, and its default depends on how Cy
+// was invoked -- which a reader of the journal cannot recompute. So it is
+// written on every run, including the runs where it is off.
+func TestEngineRecordsWhetherBackgroundJobsWereAvailable(t *testing.T) {
+	for _, available := range []bool{true, false} {
+		s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace", Model: "fake/model"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(Config{Model: &scriptedModel{}, Session: s, SystemPrompt: "system", BackgroundJobs: available}); err != nil {
+			t.Fatal(err)
+		}
+		records, err := s.Records()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := configurations(t, s)[0].Settings.BackgroundJobs; got != available {
+			t.Fatalf("BackgroundJobs = %v, want %v", got, available)
+		}
+		// Through the encoding rather than the decoded struct, because the
+		// claim is about the key being present: an omitted false reads exactly
+		// like a build that never knew the setting existed.
+		for _, record := range records {
+			if record.Type != session.RecordSessionConfigured {
+				continue
+			}
+			if !strings.Contains(string(record.Payload), `"background_jobs":`) {
+				t.Fatalf("session_configured omits background_jobs when it is %v: %s", available, record.Payload)
+			}
+		}
+	}
+}
+
 // A window nobody supplied is a guess, and the journal has to say so: the same
 // number recorded as measured would read as the endpoint's own answer.
 func TestEngineRecordsAFallbackContextWindowAsEstimated(t *testing.T) {

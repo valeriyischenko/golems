@@ -53,6 +53,10 @@ type Config struct {
 	// that has said so deliberately should ask for.
 	MaxToolIterations int
 	RequestPolicy     golem.RequestPolicy
+	// BackgroundJobs is recorded rather than used: the engine does not start
+	// jobs, but what the tools it was handed could do is part of what the run
+	// was configured as.
+	BackgroundJobs bool
 	// BoundaryEvents reports what is waiting to be told to the model, without
 	// consuming it. BoundaryEventDelivered consumes one, and is called only after
 	// that event is in the journal. Two hooks rather than one because the engine
@@ -93,6 +97,7 @@ type Engine struct {
 	sandbox                session.SandboxState
 	maxToolIterations      int
 	requestPolicy          golem.RequestPolicy
+	backgroundJobs         bool
 	boundaryEvents         func(runID string) ([]BoundaryEvent, error)
 	boundaryEventDelivered func(jobID string) error
 	sanitize               func(string) string
@@ -149,6 +154,7 @@ func New(cfg Config) (*Engine, error) {
 		// Negative survives: golem reads it as unlimited. Only zero, which is
 		// "the caller did not say", becomes the default.
 		maxToolIterations:      cmp.Or(cfg.MaxToolIterations, defaultMaxToolIterationsPerTurn),
+		backgroundJobs:         cfg.BackgroundJobs,
 		boundaryEvents:         cfg.BoundaryEvents,
 		boundaryEventDelivered: cfg.BoundaryEventDelivered,
 		sanitize:               sanitize,
@@ -232,6 +238,7 @@ func (e *Engine) settings() session.SessionSettings {
 		ContextWindow:          e.contextWindow,
 		ContextWindowEstimated: e.contextEstimated,
 		MaxToolIterations:      e.maxToolIterations,
+		BackgroundJobs:         e.backgroundJobs,
 	}
 	if e.requestPolicy.RetryBudget > 0 {
 		settings.RetryBudget = e.requestPolicy.RetryBudget.String()

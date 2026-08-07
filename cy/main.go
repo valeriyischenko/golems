@@ -50,6 +50,7 @@ func runMain() (returnErr error) {
 	verbose := flag.Bool("v", false, "show progress and usage in one-shot mode")
 	saveSession := flag.Bool("save-session", cfg.SaveSession, "keep a resumable session for a one-shot invocation")
 	jsonOutput := flag.Bool("json", cfg.JSON, "emit one versioned JSON result on stdout")
+	background := flag.String("background", os.Getenv("CY_BACKGROUND"), "let the model start background jobs: true or false (defaults to true outside a one-shot run)")
 	profile := flag.String("profile", cfg.CapabilityProfile, "capability profile: full, edit, or read-only")
 	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "model command isolation: auto, off, or on")
 	theme := flag.String("theme", cfg.TerminalTheme, "terminal theme: auto, light, or dark")
@@ -88,6 +89,10 @@ func runMain() (returnErr error) {
 		return asConfigError(err)
 	}
 	cfg.StreamIdleTimeout, err = normalizePositiveDuration(*streamIdleTimeout, "stream idle timeout")
+	if err != nil {
+		return asConfigError(err)
+	}
+	cfg.Background, err = normalizeBackground(*background)
 	if err != nil {
 		return asConfigError(err)
 	}

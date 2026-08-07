@@ -42,6 +42,10 @@ type Config struct {
 	CapabilityProfile string
 	SandboxPolicy     string
 	TerminalTheme     string
+	// Background says whether the model may start background jobs. Nil is the
+	// caller saying nothing, which is not the same as saying no; see
+	// BackgroundJobs for what decides it then.
+	Background *bool
 	// ToolsFile and ExternalTools are the declared tool catalog: where it was
 	// read from, and what it said. Read once at startup rather than per call,
 	// so every turn of a session offers the same tools and the session can
@@ -65,6 +69,25 @@ func LoadConfig() Config {
 		SandboxPolicy:     cmp.Or(strings.TrimSpace(os.Getenv("CY_SANDBOX")), defaultSandboxPolicy),
 		TerminalTheme:     cmp.Or(strings.TrimSpace(os.Getenv("CY_THEME")), defaultTerminalTheme),
 	}
+}
+
+// BackgroundJobs says whether the model may start work that outlives the tool
+// call, and inspect it afterwards.
+//
+// The default is the invocation, which is a proxy for the property rather than
+// the property itself. An interactive session has somebody watching and stays
+// open; a one-shot exits when its turn ends and kills whatever it started, so a
+// model that backgrounds a build and answers straight away would be reporting
+// work that was silently killed. What the proxy misses is a long unattended
+// run, which is launched exactly like a one-shot and is neither short-lived nor
+// watched -- completions reach it before every model request within a turn, not
+// only between turns. So the proxy stays as the default and stops being the
+// rule.
+func (c Config) BackgroundJobs() bool {
+	if c.Background != nil {
+		return *c.Background
+	}
+	return !c.PrintMode
 }
 
 // loadPromptFile reads a prompt whose text is configuration rather than code.
@@ -165,6 +188,26 @@ func normalizePositiveDuration(value, setting string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s %q; expected a positive duration such as 90s or 5m", setting, value)
 	}
 	return duration, nil
+}
+
+// normalizeBackground reads whether the model may start background jobs. An
+// empty value means the caller did not say and the invocation decides.
+//
+// Three states rather than two because the default is not a constant, so an
+// explicit "false" has to be distinguishable from silence -- otherwise turning
+// background off in an interactive session and saying nothing in a one-shot
+// would be the same request. Spelled as a value rather than as a bare switch
+// for the same reason: a flag that only turns things on has no way to say off.
+func normalizeBackground(value string) (*bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	allowed, err := strconv.ParseBool(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid background setting %q; expected true or false", value)
+	}
+	return &allowed, nil
 }
 
 func normalizeTerminalTheme(value string) (string, error) {

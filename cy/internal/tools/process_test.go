@@ -205,7 +205,7 @@ func TestProcessManagerCloseKillsBackgroundJobs(t *testing.T) {
 	}
 }
 
-func TestOneShotBashDoesNotExposeBackground(t *testing.T) {
+func TestBashWithoutBackgroundNeitherOffersItNorAcceptsIt(t *testing.T) {
 	manager := processManagerForTest(t)
 	manager.allowBackground = false
 	rawSchema, err := json.Marshal(manager.Tools()[0].Definition.Function.Parameters)
@@ -213,14 +213,17 @@ func TestOneShotBashDoesNotExposeBackground(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(rawSchema), `"background"`) {
-		t.Fatalf("one-shot Bash schema exposes background: %s", rawSchema)
+		t.Fatalf("Bash schema exposes background where it is turned off: %s", rawSchema)
 	}
 	rawArgs, err := json.Marshal(bashArgs{Command: "printf nope", Background: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Refused as well as hidden. A model that has seen the parameter in some
+	// other session can still ask for it, and running the command in the
+	// foreground instead would answer a question nobody asked.
 	_, err = manager.bash(context.Background(), llm.ToolCall{Function: llm.ToolFunction{Arguments: string(rawArgs)}})
-	if err == nil || !strings.Contains(err.Error(), "unavailable in one-shot mode") {
+	if err == nil || !strings.Contains(err.Error(), "background Bash is turned off") {
 		t.Fatalf("background error = %v", err)
 	}
 }

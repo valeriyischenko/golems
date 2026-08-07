@@ -122,6 +122,66 @@ func TestNormalizeMaxToolIterations(t *testing.T) {
 	}
 }
 
+func TestBackgroundJobsSettingOverridesTheInvocation(t *testing.T) {
+	yes, no := true, false
+	for _, test := range []struct {
+		name      string
+		setting   *bool
+		printMode bool
+		want      bool
+	}{
+		// Unset keeps the historical behaviour on both sides, which is what
+		// makes this a setting rather than a change.
+		{name: "unset interactive", want: true},
+		{name: "unset one-shot", printMode: true},
+		// The case the setting exists for: a long unattended run is launched
+		// exactly like a one-shot and is neither short-lived nor watched.
+		{name: "on in a one-shot", setting: &yes, printMode: true, want: true},
+		// And the other direction has to work too, or "unset" and "off" would
+		// be the same request and the default could not stay the invocation.
+		{name: "off interactively", setting: &no},
+	} {
+		cfg := Config{Background: test.setting, PrintMode: test.printMode}
+		if got := cfg.BackgroundJobs(); got != test.want {
+			t.Fatalf("%s: BackgroundJobs() = %v; want %v", test.name, got, test.want)
+		}
+	}
+}
+
+func TestNormalizeBackground(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  *bool
+	}{
+		{input: ""},
+		{input: "   "},
+		{input: " true ", want: boolPointer(true)},
+		{input: "false", want: boolPointer(false)},
+		{input: "1", want: boolPointer(true)},
+		{input: "0", want: boolPointer(false)},
+	} {
+		got, err := normalizeBackground(test.input)
+		switch {
+		case err != nil:
+			t.Fatalf("normalizeBackground(%q) = %v", test.input, err)
+		case (got == nil) != (test.want == nil):
+			t.Fatalf("normalizeBackground(%q) = %v; want %v", test.input, got, test.want)
+		case got != nil && *got != *test.want:
+			t.Fatalf("normalizeBackground(%q) = %v; want %v", test.input, *got, *test.want)
+		}
+	}
+	// Exit 2 before the run starts, like every other malformed setting: "yes"
+	// silently read as false would turn background off in the run that asked
+	// for it and say nothing.
+	for _, input := range []string{"yes", "no", "on", "off", "maybe"} {
+		if _, err := normalizeBackground(input); err == nil {
+			t.Fatalf("normalizeBackground(%q) accepted a value that is not a boolean", input)
+		}
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
 func TestLoadPromptFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "system.md")

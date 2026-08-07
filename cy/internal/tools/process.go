@@ -205,7 +205,7 @@ func (m *processManager) runBash(ctx context.Context, args bashArgs, origin proc
 		return golem.ToolResult{}, err
 	}
 	if args.Background && !m.allowBackground {
-		return golem.ToolResult{}, errors.New("background Bash is unavailable in one-shot mode; run the command in the foreground")
+		return golem.ToolResult{}, errors.New("background Bash is turned off for this run; run the command in the foreground")
 	}
 	workdir, display, info, err := m.workspace.resolveExistingPath(args.Workdir)
 	if err != nil {

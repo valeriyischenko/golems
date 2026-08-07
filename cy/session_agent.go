@@ -564,7 +564,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 	if err != nil {
 		return nil, nil, fmt.Errorf("load project instructions: %w", err)
 	}
-	processes, err := toolruntime.NewProcessManager(a.root, resolveStateHome(cfg.Home), runtimeSandboxPolicy(cfg), !cfg.PrintMode)
+	processes, err := toolruntime.NewProcessManager(a.root, resolveStateHome(cfg.Home), runtimeSandboxPolicy(cfg), cfg.BackgroundJobs())
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize process runtime: %w", err)
 	}
@@ -595,6 +595,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		Sandbox:                cfg.Security.Journal(cfg.SandboxPolicy),
 		MaxToolIterations:      cfg.MaxToolIterations,
 		RequestPolicy:          requestPolicyFor(cfg),
+		BackgroundJobs:         cfg.BackgroundJobs(),
 		BoundaryEvents:         boundaryEventsFrom(processes),
 		BoundaryEventDelivered: processes.MarkCompletionDelivered,
 		Sanitize:               a.masker.Redact,

@@ -151,6 +151,16 @@ type SessionSettings struct {
 	MaxToolIterations int    `json:"max_tool_iterations,omitempty"`
 	RetryBudget       string `json:"retry_budget,omitempty"`
 	StreamIdleTimeout string `json:"stream_idle_timeout,omitempty"`
+	// BackgroundJobs says whether the model could start work that outlives the
+	// tool call. It changes the catalog rather than only a bound -- Bash is
+	// offered a background parameter or it is not -- so two sessions with the
+	// same tools were not offered the same tools.
+	//
+	// Written even when false, unlike the bounds above. A default that depends
+	// on how Cy was invoked is one a reader cannot recompute from the journal,
+	// and an omitted false would be indistinguishable from a build that did not
+	// know the setting existed.
+	BackgroundJobs bool `json:"background_jobs"`
 }
 
 type ModelChanged struct {
