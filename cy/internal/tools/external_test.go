@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/levmv/golems/pkg/golem"
+	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/llm"
 )
 
@@ -87,10 +88,14 @@ func TestLoadExternalToolsRejectsBadDeclarations(t *testing.T) {
 		{"absolute workdir", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"workdir":"/etc"}]}`, "workdir"},
 		{"overrides HOME", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"HOME":"/root"}}]}`, "HOME"},
 		{"reserved env", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"CY_INTERNAL_SANDBOX_POLICY":"off"}}]}`, "reserved"},
-		// Reserved rather than unknown: the key is part of the format now, so
-		// a config written for background tools fails loudly instead of
-		// quietly running in the foreground.
-		{"background", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":true}]}`, "background"},
+		{"unknown background", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":"sometimes"}]}`, "background"},
+		{"background is not a number", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":3}]}`, "background"},
+		// auto writes a background flag into the tool's schema, and a tool that
+		// declares one of its own would be shown a schema its author did not
+		// write and handed arguments with a field quietly removed.
+		{"auto collides with a parameter", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":"auto","parameters":{"type":"object","properties":{"background":{"type":"string"}}}}]}`, "background"},
+		{"negative yield", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"yield":-1}]}`, "yield"},
+		{"yield without a foreground", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":"always","yield":5}]}`, "yield"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -401,5 +406,142 @@ func TestAConfiguredToolRunsAsAJobUnderTheSameSupervisor(t *testing.T) {
 	}
 	if len(manager.jobs) != 0 {
 		t.Fatalf("manager still holds %d jobs", len(manager.jobs))
+	}
+}
+
+// A tool declared always is one whose answer is not the point -- it starts a
+// server, a watcher, a build -- so the call is over as soon as the work is
+// under way. What makes that useful rather than a leak is the job id: the same
+// handle Bash hands back, for the same tools to ask about.
+func TestAToolDeclaredAlwaysRunsBehindAJobID(t *testing.T) {
+	manager := processManagerForTest(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	tool := externalToolForTest(t, manager, waitForGate(gate)+`printf 'late answer\n'`,
+		ExternalTool{Effect: "read", Background: BackgroundAlways})
+
+	// Returns while the tool is still blocked, which is the whole claim.
+	result := runExternalToolForTest(t, tool, `{}`)
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok || meta.JobID == "" {
+		t.Fatalf("meta = %#v, want a job id", result.Meta)
+	}
+	if meta.ExitCode != nil || !strings.Contains(result.Content, meta.JobID) {
+		t.Fatalf("content = %q, meta = %+v", result.Content, meta)
+	}
+	job := manager.get(meta.JobID)
+	if job == nil {
+		t.Fatal("the job tool cannot reach the job the model was given")
+	}
+	openGate(t, gate)
+	<-job.done
+
+	if out, _ := job.snapshot(0); !strings.Contains(string(out), "late answer") {
+		t.Fatalf("job output = %q", out)
+	}
+	// And it reports itself the way a background Bash job does, which is the
+	// only way the model hears about work it walked away from.
+	pending, err := manager.PendingCompletionEvents("")
+	if err != nil || len(pending) != 1 || pending[0].JobID != meta.JobID {
+		t.Fatalf("pending = %+v, err = %v", pending, err)
+	}
+}
+
+// auto is the model's call, so the flag has to be in the schema it is shown --
+// and out of the arguments the tool is handed, which never declared it.
+func TestBackgroundAutoAsksTheModelAndKeepsTheFlagToItself(t *testing.T) {
+	manager := processManagerForTest(t)
+	tool := externalToolForTest(t, manager, `cat`, ExternalTool{Effect: "read", Background: BackgroundAuto})
+	if _, ok := tool.Definition.Function.Parameters.Properties[backgroundArg]; !ok {
+		t.Fatalf("schema = %+v, want a background flag", tool.Definition.Function.Parameters)
+	}
+
+	waited := runExternalToolForTest(t, tool, `{"query":"schelling","background":false}`)
+	if waited.Content != `{"query":"schelling"}` {
+		t.Fatalf("content = %q, want the flag stripped and the answer waited for", waited.Content)
+	}
+	backgrounded := runExternalToolForTest(t, tool, `{"query":"schelling","background":true}`)
+	meta, ok := backgrounded.Meta.(ExternalToolMeta)
+	if !ok || meta.JobID == "" {
+		t.Fatalf("meta = %#v, want a job id", backgrounded.Meta)
+	}
+}
+
+// yield is not the model's call. A tool nobody should background on purpose
+// still should not hold a turn open until its timeout, so the wait is bounded
+// and what is left is a job like any other.
+func TestALongForegroundToolYieldsIntoAJob(t *testing.T) {
+	manager := processManagerForTest(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	tool := externalToolForTest(t, manager, waitForGate(gate), ExternalTool{Effect: "read", Yield: 1})
+	started := time.Now()
+	result := runExternalToolForTest(t, tool, `{}`)
+	if elapsed := time.Since(started); elapsed > 30*time.Second {
+		t.Fatalf("the call did not yield: %s", elapsed)
+	}
+	meta, ok := result.Meta.(ExternalToolMeta)
+	if !ok || meta.JobID == "" {
+		t.Fatalf("meta = %#v, want a job id", result.Meta)
+	}
+	openGate(t, gate)
+	<-manager.get(meta.JobID).done
+}
+
+// The run-level setting is about work outliving a tool call, and a configured
+// tool is not an exception to it. Waiting anyway is the harmless direction:
+// the model gets a complete answer where it would have got a handle.
+func TestBackgroundOffForTheRunKeepsConfiguredToolsInTheForeground(t *testing.T) {
+	manager, err := NewProcessManager(ProcessOptions{Root: t.TempDir(), Home: t.TempDir(), Sandbox: sandboxOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	tool := externalToolForTest(t, manager, `printf 'answered\n'`, ExternalTool{Effect: "read", Background: BackgroundAlways})
+	result := runExternalToolForTest(t, tool, `{}`)
+	if !strings.Contains(result.Content, "answered") {
+		t.Fatalf("content = %q", result.Content)
+	}
+	if meta, ok := result.Meta.(ExternalToolMeta); !ok || meta.JobID != "" {
+		t.Fatalf("meta = %#v, want no job id", result.Meta)
+	}
+}
+
+// A profile that hides Bash hides the job tool with it. That is right until a
+// configured tool the profile does keep hands back a job id, which the model
+// would then have no way to ask about.
+func TestTheJobToolComesBackForAProfileThatKeepsABackgroundTool(t *testing.T) {
+	manager := processManagerForTest(t)
+	declarations := []ExternalTool{
+		{Name: "watcher", Description: "d", Effect: "read", Command: []string{"true"}, Background: BackgroundAlways},
+		{Name: "lookup", Description: "d", Effect: "read", Command: []string{"true"}},
+	}
+	readOnly := FilterForProfile(manager.Tools(), "read-only")
+	if len(readOnly) != 0 {
+		t.Fatalf("read-only kept %d process tools", len(readOnly))
+	}
+	quiet := golem.FunctionToolWithEffect(golem.ToolEffectRead, "lookup", "d", jsonschema.Obj(), nil)
+	if got := manager.EnsureJobTool([]golem.Tool{quiet}, declarations); len(got) != 1 {
+		t.Fatalf("tools = %d, want the job tool left out for a tool nobody can background", len(got))
+	}
+	loud := golem.FunctionToolWithEffect(golem.ToolEffectRead, "watcher", "d", jsonschema.Obj(), nil)
+	got := manager.EnsureJobTool([]golem.Tool{loud}, declarations)
+	if len(got) != 2 || got[1].Definition.Function.Name != jobToolName {
+		t.Fatalf("tools = %+v, want the job tool appended", got)
+	}
+	// Once only, and never beside the copy a full profile already has.
+	if again := manager.EnsureJobTool(got, declarations); len(again) != 2 {
+		t.Fatalf("tools = %d, want the job tool added once", len(again))
+	}
+}
+
+// waitForGate blocks a test tool until the test says otherwise, which is how a
+// background call is shown to have returned early without racing a sleep.
+func waitForGate(gate string) string {
+	return "cat >/dev/null; while [ ! -f " + gate + " ]; do sleep 0.02; done; "
+}
+
+func openGate(t *testing.T, gate string) {
+	t.Helper()
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -2,11 +2,13 @@ package tools
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,12 +43,55 @@ type ExternalTool struct {
 	Timeout     int               `json:"timeout,omitempty"`
 	Workdir     string            `json:"workdir,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
-	// Background is accepted and refused rather than unknown. Background is a
-	// property of tools later; naming the key now means turning it on is a
-	// change in behaviour rather than a change in the file format, and a
-	// config written for that day fails loudly here instead of quietly
-	// running in the foreground.
-	Background bool `json:"background,omitempty"`
+	// Background says who decides that this tool's work outlives the call.
+	Background BackgroundMode `json:"background,omitempty"`
+	// Yield is how many seconds a foreground call waits before it hands the
+	// model a job id and lets the tool run on. Zero waits for the tool.
+	//
+	// Separate from Background because they answer different questions. The
+	// mode says whether the model may choose to walk away; the yield says how
+	// long the turn is willing to stand still, which is Cy's business and not
+	// the model's. A build nobody should background on purpose still should not
+	// hold a turn open for ten minutes.
+	Yield int `json:"yield,omitempty"`
+}
+
+// BackgroundMode is who decides that a configured tool keeps running after the
+// call that started it returns.
+//
+// never is the default, and the only thing that ever happened before. auto puts
+// a background flag in the tool's own schema and lets the model choose per
+// call. always is for a tool that only ever starts something -- a server, a
+// watcher -- and has nothing to say by the time it would have returned.
+type BackgroundMode string
+
+const (
+	BackgroundNever  BackgroundMode = "never"
+	BackgroundAuto   BackgroundMode = "auto"
+	BackgroundAlways BackgroundMode = "always"
+)
+
+// backgroundArg is the flag auto adds to a tool's schema, and the one name a
+// tool declaring auto may not use for a parameter of its own.
+const backgroundArg = "background"
+
+// UnmarshalJSON accepts a bool as well as a name, because the key was a bool
+// first and because true and false are what anyone writing it reaches for.
+func (b *BackgroundMode) UnmarshalJSON(raw []byte) error {
+	var name string
+	if err := json.Unmarshal(raw, &name); err == nil {
+		*b = BackgroundMode(strings.ToLower(strings.TrimSpace(name)))
+		return nil
+	}
+	var always bool
+	if err := json.Unmarshal(raw, &always); err != nil {
+		return errors.New("background must be never, auto, always, or a boolean")
+	}
+	*b = BackgroundNever
+	if always {
+		*b = BackgroundAlways
+	}
+	return nil
 }
 
 type externalToolFile struct {
@@ -125,8 +170,26 @@ func (t *ExternalTool) normalize() error {
 	if t.Timeout < 0 {
 		return fmt.Errorf("timeout %d must not be negative", t.Timeout)
 	}
-	if t.Background {
-		return errors.New("background external tools are not supported yet; run it in the foreground or have it start its own daemon")
+	if t.Background == "" {
+		t.Background = BackgroundNever
+	}
+	switch t.Background {
+	case BackgroundNever, BackgroundAlways:
+	case BackgroundAuto:
+		// Refused rather than overwritten. The tool would be shown a schema its
+		// author did not write and handed arguments with one field quietly
+		// missing, and neither is visible from inside the tool.
+		if _, taken := t.Parameters.Properties[backgroundArg]; taken {
+			return errors.New("background auto adds a background parameter to this tool's schema and the schema already declares one; rename it, or choose never or always")
+		}
+	default:
+		return fmt.Errorf("background %q must be one of never, auto, always", t.Background)
+	}
+	if t.Yield < 0 {
+		return fmt.Errorf("yield %d must not be negative", t.Yield)
+	}
+	if t.Yield > 0 && t.Background == BackgroundAlways {
+		return errors.New("yield is how long a foreground call waits, and background always never makes one")
 	}
 	t.Workdir = strings.TrimSpace(t.Workdir)
 	if filepath.IsAbs(t.Workdir) {
@@ -158,7 +221,11 @@ func (t ExternalTool) timeout() time.Duration {
 
 // rendered is the declaration as this run resolved it, for the journal. Values
 // of declared variables are deliberately left behind; see ExternalToolConfig.
-func (t ExternalTool) rendered(program string) session.ExternalToolConfig {
+//
+// The background mode is the one that will be used and not the one that was
+// written, because a run with background turned off runs every configured tool
+// in the foreground and the file alone would not say so.
+func (t ExternalTool) rendered(program string, mode BackgroundMode, yield time.Duration) session.ExternalToolConfig {
 	config := session.ExternalToolConfig{
 		Name:    t.Name,
 		Effect:  t.Effect,
@@ -166,6 +233,12 @@ func (t ExternalTool) rendered(program string) session.ExternalToolConfig {
 		Command: t.Command,
 		Workdir: t.Workdir,
 		Timeout: t.timeout().String(),
+	}
+	if mode != BackgroundNever {
+		config.Background = string(mode)
+	}
+	if yield > 0 {
+		config.Yield = yield.String()
 	}
 	for name := range t.Env {
 		config.EnvNames = append(config.EnvNames, name)
@@ -178,15 +251,18 @@ func (t ExternalTool) rendered(program string) session.ExternalToolConfig {
 // same thing again by hand. The call's arguments are not repeated here because
 // they are already on the tool_call record this result answers.
 type ExternalToolMeta struct {
-	Tool       string   `json:"tool"`
-	Program    string   `json:"program"`
-	Command    []string `json:"command"`
-	Workdir    string   `json:"workdir"`
-	Sandbox    string   `json:"sandbox"`
-	ExitCode   *int     `json:"exit_code,omitempty"`
-	DurationMS int64    `json:"duration_ms"`
-	Truncated  bool     `json:"truncated,omitempty"`
-	TimedOut   bool     `json:"timed_out,omitempty"`
+	Tool    string   `json:"tool"`
+	Program string   `json:"program"`
+	Command []string `json:"command"`
+	Workdir string   `json:"workdir"`
+	Sandbox string   `json:"sandbox"`
+	// JobID is set when the call left the tool running. It is the link between
+	// this record and everything the job tool later says about the same work.
+	JobID      string `json:"job_id,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
 }
 
 // ExternalTools turns declarations into runnable tools, and returns beside them
@@ -206,16 +282,53 @@ func (m *processManager) ExternalTools(declarations []ExternalTool) ([]golem.Too
 		if err != nil {
 			return nil, nil, fmt.Errorf("tool %s: %w", declaration.Name, err)
 		}
+		mode, yield := m.externalBackground(declaration)
+		parameters := declaration.Parameters
+		if mode == BackgroundAuto {
+			parameters = withBackgroundArg(parameters)
+		}
 		tools = append(tools, golem.FunctionToolWithEffect(
 			golem.ToolEffect(declaration.Effect),
 			declaration.Name,
 			declaration.Description,
-			declaration.Parameters,
-			m.externalRunner(declaration, program),
+			parameters,
+			m.externalRunner(declaration, program, mode, yield),
 		))
-		configs = append(configs, declaration.rendered(program))
+		configs = append(configs, declaration.rendered(program, mode, yield))
 	}
 	return tools, configs, nil
+}
+
+// externalBackground is how a declaration's background settings apply to this
+// run. A run with background jobs turned off runs configured tools in the
+// foreground too: the setting is about work outliving a tool call, and a
+// configured tool is not an exception to it. Waiting can only give the model a
+// more complete answer than it asked for, which is the harmless direction.
+func (m *processManager) externalBackground(t ExternalTool) (BackgroundMode, time.Duration) {
+	if !m.allowBackground {
+		return BackgroundNever, 0
+	}
+	return cmp.Or(t.Background, BackgroundNever), time.Duration(t.Yield) * time.Second
+}
+
+// withBackgroundArg adds the flag the model fills in for a tool declared auto.
+// A declaration that already names the parameter is refused when it is loaded,
+// so this never replaces one the tool meant to have.
+func withBackgroundArg(schema jsonschema.Schema) jsonschema.Schema {
+	properties := make(map[string]jsonschema.Schema, len(schema.Properties)+1)
+	maps.Copy(properties, schema.Properties)
+	properties[backgroundArg] = jsonschema.Bool{
+		Description: "Return a job id immediately and let the tool keep running. Use it for work whose result you do not need in this reply; leave it out to wait for the answer.",
+	}.BuildSchema()
+	schema.Properties = properties
+	return schema
+}
+
+// canBackground reports whether a call on this tool can end with the tool still
+// running, either way it happens.
+func (m *processManager) canBackground(t ExternalTool) bool {
+	mode, yield := m.externalBackground(t)
+	return mode != BackgroundNever || yield > 0
 }
 
 // resolveExternalProgram finds the executable a declaration names. A bare name
@@ -251,12 +364,18 @@ func (m *processManager) resolveExternalProgram(program string) (string, error) 
 	return resolved, nil
 }
 
-func (m *processManager) externalRunner(declaration ExternalTool, program string) golem.ToolFunc {
+func (m *processManager) externalRunner(declaration ExternalTool, program string, mode BackgroundMode, yield time.Duration) golem.ToolFunc {
 	timeout := declaration.timeout()
 	return func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {
 		arguments, err := externalCallArguments(call)
 		if err != nil {
 			return golem.ToolResult{}, err
+		}
+		background := mode == BackgroundAlways
+		if mode == BackgroundAuto {
+			if arguments, background, err = takeBackgroundArg(arguments); err != nil {
+				return golem.ToolResult{}, err
+			}
 		}
 		workdir, display, info, err := m.workspace.resolveExistingPath(declaration.Workdir)
 		if err != nil {
@@ -306,16 +425,46 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		if err != nil {
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: start %s: %v", golem.ErrToolFatal, declaration.Name, program, err)
 		}
-		// Forgotten either way: the call is synchronous, so by the time this
-		// returns there is nothing left for anyone to ask about, and the
-		// mailbox goes with it.
-		defer m.forget(job)
+		running := func() golem.ToolResult {
+			meta := ExternalToolMeta{
+				Tool: declaration.Name, Program: program, Command: declaration.Command,
+				Workdir: display, Sandbox: sandbox, JobID: job.id,
+				DurationMS: time.Since(job.startedAt).Milliseconds(),
+			}
+			return golem.ToolResult{
+				Content: fmt.Sprintf("%s is running as job %s. Read its output, wait for it or stop it with the job tool; it will report when it ends.", declaration.Name, job.id),
+				Meta:    meta,
+			}
+		}
+		if background {
+			return running(), nil
+		}
+
+		var yielded <-chan time.Time
+		if yield > 0 {
+			timer := time.NewTimer(yield)
+			defer timer.Stop()
+			yielded = timer.C
+		}
 		select {
 		case <-job.done:
+		case <-yielded:
+			// Raced: the tool may have ended while the timer was firing, and a
+			// job id for work that is already done wastes a turn.
+			select {
+			case <-job.done:
+			default:
+				return running(), nil
+			}
 		case <-ctx.Done():
 			_, _ = m.stop(context.Background(), job.id, "tool call cancelled")
+			m.forget(job)
 			return golem.ToolResult{}, ctx.Err()
 		}
+		// Forgotten only once it has been waited for: the answer is in this
+		// result, so there is nothing left for anyone to ask about and the
+		// mailbox goes with it. A job left running keeps both.
+		defer m.forget(job)
 
 		job.mu.Lock()
 		status, exitCode, errText := job.status, job.exitCode, job.errText
@@ -365,6 +514,31 @@ func externalCallArguments(call llm.ToolCall) ([]byte, error) {
 		return nil, errors.New("invalid tool arguments: multiple JSON values")
 	}
 	return []byte(arguments), nil
+}
+
+// takeBackgroundArg reads the flag auto put in the schema and returns the
+// arguments without it, so the tool is handed only what its own schema
+// declares. Re-marshalled rather than edited in place: key order in an object
+// means nothing, and half-removing a field would hand the tool broken JSON.
+func takeBackgroundArg(arguments []byte) ([]byte, bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(arguments, &fields); err != nil {
+		return nil, false, fmt.Errorf("invalid tool arguments: %w", err)
+	}
+	raw, ok := fields[backgroundArg]
+	if !ok {
+		return arguments, false, nil
+	}
+	var background bool
+	if err := json.Unmarshal(raw, &background); err != nil {
+		return nil, false, errors.New("invalid tool arguments: background must be true or false")
+	}
+	delete(fields, backgroundArg)
+	trimmed, err := json.Marshal(fields)
+	if err != nil {
+		return nil, false, err
+	}
+	return trimmed, background, nil
 }
 
 func appendExternalEnv(base []string, extra map[string]string) []string {

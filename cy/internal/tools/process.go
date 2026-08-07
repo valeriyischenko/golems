@@ -33,6 +33,7 @@ const (
 	jobKillRetryInterval   = 20 * time.Millisecond
 	defaultJobWait         = time.Minute
 	maxCommandSummary      = 120
+	jobToolName            = "job"
 )
 
 const (
@@ -300,18 +301,50 @@ func (m *processManager) Tools() []golem.Tool {
 			jsonschema.Obj(bashProperties...).NoAdditionalProperties(),
 			m.bash,
 		),
-		golem.FunctionToolWithEffect(
-			golem.ToolEffectProcess,
-			"job",
-			"Inspect, wait for, or stop managed Bash processes. Actions: list, output, wait, stop.",
-			jsonschema.Obj(
-				jsonschema.Required("action", jsonschema.Str{Description: "One of: list, output, wait, stop."}),
-				jsonschema.Optional("job_id", jsonschema.Str{Description: "Job id returned by Bash. Required by every action except list."}),
-				jsonschema.Optional("timeout", jsonschema.Int{Description: "For wait: seconds to block before returning whatever the job's state is by then. Defaults to 60; capped at 3600.", Minimum: new(1), Maximum: new(3600)}),
-			).NoAdditionalProperties(),
-			m.job,
-		),
+		m.jobTool(),
 	}
+}
+
+func (m *processManager) jobTool() golem.Tool {
+	return golem.FunctionToolWithEffect(
+		golem.ToolEffectProcess,
+		jobToolName,
+		"Inspect, wait for, or stop managed processes. Actions: list, output, wait, stop.",
+		jsonschema.Obj(
+			jsonschema.Required("action", jsonschema.Str{Description: "One of: list, output, wait, stop."}),
+			jsonschema.Optional("job_id", jsonschema.Str{Description: "Job id returned by the tool that started the job. Required by every action except list."}),
+			jsonschema.Optional("timeout", jsonschema.Int{Description: "For wait: seconds to block before returning whatever the job's state is by then. Defaults to 60; capped at 3600.", Minimum: new(1), Maximum: new(3600)}),
+		).NoAdditionalProperties(),
+		m.job,
+	)
+}
+
+// EnsureJobTool puts the job tool back for a profile that hides Bash but keeps
+// a configured tool able to leave work running. Such a tool hands back a job
+// id, and an id the model cannot ask about is worse than no background at all:
+// it is told the work continues and given no way to see how it ended.
+//
+// Appended after the profile filter rather than exempted from it, so it appears
+// for exactly the reason it is needed and disappears with the tools that need
+// it.
+func (m *processManager) EnsureJobTool(tools []golem.Tool, declarations []ExternalTool) []golem.Tool {
+	backgroundable := make(map[string]bool, len(declarations))
+	for _, declaration := range declarations {
+		if m.canBackground(declaration) {
+			backgroundable[declaration.Name] = true
+		}
+	}
+	needed := false
+	for _, tool := range tools {
+		if tool.Definition.Function.Name == jobToolName {
+			return tools
+		}
+		needed = needed || backgroundable[tool.Definition.Function.Name]
+	}
+	if !needed {
+		return tools
+	}
+	return append(tools, m.jobTool())
 }
 
 func (m *processManager) bash(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {

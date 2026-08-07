@@ -479,6 +479,9 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 		configured = configs
 	}
 	tools = toolruntime.FilterForProfile(tools, profile)
+	if processes != nil {
+		tools = processes.EnsureJobTool(tools, a.cfg.ExternalTools)
+	}
 	if _, err := golem.NewToolSet(tools); err != nil {
 		return nil, nil, err
 	}

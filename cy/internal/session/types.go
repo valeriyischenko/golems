@@ -122,9 +122,14 @@ type ExternalToolConfig struct {
 	Effect   string   `json:"effect"`
 	Program  string   `json:"program"`
 	Command  []string `json:"command"`
-	Workdir  string   `json:"workdir,omitempty"`
-	Timeout  string   `json:"timeout,omitempty"`
-	EnvNames []string `json:"env_names,omitempty"`
+	Workdir string `json:"workdir,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
+	// Background and Yield say whether a call on this tool can end with the
+	// tool still running, which changes both the schema the model was shown and
+	// what a result means. Absent is the tool always being waited for.
+	Background string   `json:"background,omitempty"`
+	Yield      string   `json:"yield,omitempty"`
+	EnvNames   []string `json:"env_names,omitempty"`
 }
 
 // SessionSettings are the operational bounds the session runs under: where the
