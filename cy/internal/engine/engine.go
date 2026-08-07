@@ -33,6 +33,7 @@ type Config struct {
 	ModelURI           string
 	SystemPrompt       string
 	InstructionPrompts []string
+	BaseURL            string
 	ContextWindow      int
 	ContextEstimated   bool
 	Tools              []golem.Tool
@@ -74,6 +75,7 @@ type Engine struct {
 	requestPolicy      golem.RequestPolicy
 	boundaryEvents     func(runID string) ([]BoundaryEvent, error)
 	sanitize           func(string) string
+	baseURL            string
 	contextWindow      int
 	contextEstimated   bool
 }
@@ -115,6 +117,7 @@ func New(cfg Config) (*Engine, error) {
 		maxToolIterations: cmp.Or(cfg.MaxToolIterations, defaultMaxToolIterationsPerTurn),
 		boundaryEvents:    cfg.BoundaryEvents,
 		sanitize:          sanitize,
+		baseURL:           strings.TrimSpace(cfg.BaseURL),
 		contextWindow:     cfg.ContextWindow,
 		contextEstimated:  cfg.ContextEstimated,
 	}
@@ -147,6 +150,7 @@ func (e *Engine) recordConfiguration() error {
 		InstructionPrompts: e.instructionPrompts,
 		Tools:              e.tools,
 		Sandbox:            e.sandbox,
+		Settings:           e.settings(),
 	}
 	state, err := e.session.Replay()
 	if err != nil {
@@ -158,6 +162,27 @@ func (e *Engine) recordConfiguration() error {
 	}
 	_, err = e.session.Append(session.RecordSessionConfigured, configured)
 	return err
+}
+
+// settings reports the bounds as they apply rather than as they were asked for:
+// the context window after the fallback, the fuse after the default, the request
+// durations after golem's own defaults would have been. A journal that recorded
+// the request would say nothing on a run that passed no flags, which is the run
+// most in need of saying what it used.
+func (e *Engine) settings() session.SessionSettings {
+	settings := session.SessionSettings{
+		BaseURL:                e.baseURL,
+		ContextWindow:          e.contextWindow,
+		ContextWindowEstimated: e.contextEstimated,
+		MaxToolIterations:      e.maxToolIterations,
+	}
+	if e.requestPolicy.RetryBudget > 0 {
+		settings.RetryBudget = e.requestPolicy.RetryBudget.String()
+	}
+	if e.requestPolicy.StreamIdleTimeout > 0 {
+		settings.StreamIdleTimeout = e.requestPolicy.StreamIdleTimeout.String()
+	}
+	return settings
 }
 
 // sameConfiguration compares through the encoding both sides are recorded in,
@@ -191,7 +216,11 @@ func (e *Engine) ReconfigureModel(model golem.Model, modelURI string, contextWin
 		e.contextWindow = contextWindow
 	}
 	e.contextEstimated = contextEstimated
-	return nil
+	// Switching models moves the context window, and with it the point at which
+	// the conversation compacts. Same reason the tool catalog and the sandbox are
+	// re-recorded when they change: written once at the start, it would go stale
+	// mid-session and the journal would not say when.
+	return e.recordConfiguration()
 }
 
 // ReconfigureTools replaces the model-visible tool catalog and executors at a

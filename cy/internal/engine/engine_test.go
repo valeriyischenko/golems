@@ -1003,3 +1003,68 @@ func (m *fuseModel) respond(request llm.Request) (*llm.Response, error) {
 		FinishReason: llm.FinishReasonToolUse,
 	}, nil
 }
+
+// The settings decide how the same conversation behaves -- where it compacts,
+// when a turn is cut off, when a request gives up -- and none of them show up in
+// the messages. They are recorded as they apply, so a run that passed no flags
+// still says what it used.
+func TestEngineRecordsTheBoundsARunAppliesRatherThanTheOnesAsked(t *testing.T) {
+	home := t.TempDir()
+	s, err := session.Create(session.CreateOptions{Home: home, Workspace: "/workspace", Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(Config{
+		Model:         &scriptedModel{},
+		Session:       s,
+		SystemPrompt:  "system",
+		BaseURL:       "http://endpoint.invalid/v1",
+		ContextWindow: 262144,
+		RequestPolicy: golem.RequestPolicy{MaxRetries: 4, RetryBudget: 90 * time.Second, StreamIdleTimeout: 30 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := configurations(t, s)[0].Settings
+	want := session.SessionSettings{
+		BaseURL:           "http://endpoint.invalid/v1",
+		ContextWindow:     262144,
+		MaxToolIterations: defaultMaxToolIterationsPerTurn,
+		RetryBudget:       "1m30s",
+		StreamIdleTimeout: "30s",
+	}
+	if settings != want {
+		t.Fatalf("settings = %#v, want %#v", settings, want)
+	}
+
+	// A model switch moves the context window, so it moves where the conversation
+	// compacts. Recorded like any other change, or the journal keeps claiming the
+	// window the session opened with.
+	if err := eng.ReconfigureModel(&scriptedModel{}, "fake/other", 8192, true); err != nil {
+		t.Fatal(err)
+	}
+	recorded := configurations(t, s)
+	if len(recorded) != 2 {
+		t.Fatalf("session_configured records after a model switch = %d, want 2", len(recorded))
+	}
+	if recorded[1].Settings.ContextWindow != 8192 || !recorded[1].Settings.ContextWindowEstimated {
+		t.Fatalf("window after the switch = %#v", recorded[1].Settings)
+	}
+}
+
+// A window nobody supplied is a guess, and the journal has to say so: the same
+// number recorded as measured would read as the endpoint's own answer.
+func TestEngineRecordsAFallbackContextWindowAsEstimated(t *testing.T) {
+	home := t.TempDir()
+	s, err := session.Create(session.CreateOptions{Home: home, Workspace: "/workspace", Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{Model: &scriptedModel{}, Session: s, SystemPrompt: "system"}); err != nil {
+		t.Fatal(err)
+	}
+	settings := configurations(t, s)[0].Settings
+	if settings.ContextWindow <= 0 || !settings.ContextWindowEstimated {
+		t.Fatalf("settings = %#v, want a positive estimated window", settings)
+	}
+}

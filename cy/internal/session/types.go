@@ -57,14 +57,16 @@ type SandboxState struct {
 }
 
 // SessionConfigured is what the model is working with: the prompts it was given,
-// the tools it may call, and the fence those tools run behind. It is written
-// when a session starts and again whenever any of the three changes.
+// the tools it may call, the fence those tools run behind, and the bounds the
+// run is held to. It is written when a session starts and again whenever any of
+// them changes.
 //
 // It is not part of session_started, tempting as that is. The tool catalog
 // changes mid-session when a capability profile is switched, the sandbox
-// changes on /sandbox, and a resume can start the process with a different
-// system prompt than the one the session began under. Written once into the
-// header, all three would be recorded and then quietly go stale.
+// changes on /sandbox, the context window changes with the model, and a resume
+// can start the process with a different system prompt, or different flags,
+// than the session began under. Written once into the header, all of it would
+// be recorded and then quietly go stale.
 //
 // It is recorded at all because otherwise a replay cannot say what the model
 // saw. The conversation shows the tools that were called but not the ones that
@@ -77,10 +79,37 @@ type SandboxState struct {
 // verbatim, and a journal that disagreed with them would be describing a
 // different run.
 type SessionConfigured struct {
-	SystemPrompt       string       `json:"system_prompt"`
-	InstructionPrompts []string     `json:"instruction_prompts,omitempty"`
-	Tools              []llm.Tool   `json:"tools,omitempty"`
-	Sandbox            SandboxState `json:"sandbox"`
+	SystemPrompt       string          `json:"system_prompt"`
+	InstructionPrompts []string        `json:"instruction_prompts,omitempty"`
+	Tools              []llm.Tool      `json:"tools,omitempty"`
+	Sandbox            SandboxState    `json:"sandbox"`
+	Settings           SessionSettings `json:"settings"`
+}
+
+// SessionSettings are the operational bounds the session runs under: where the
+// model was reached, how much room it was given, and the limits that decide
+// whether a run stops or keeps going. Every one of them is a flag or an
+// environment variable, so every one of them can differ between the run that
+// started a session and the run that resumed it.
+//
+// Recorded because they change how the same conversation behaves without
+// appearing anywhere in it. A context window drives when compaction happens, so
+// two runs over identical messages compact at different points and diverge from
+// there; the iteration fuse and the request bounds decide whether a turn ends in
+// an answer or is cut off. A journal that has the messages but not these
+// describes a run nobody can reproduce.
+//
+// Durations are strings rather than the nanosecond counts Go would otherwise
+// write, because this file is read.
+type SessionSettings struct {
+	BaseURL                string `json:"base_url,omitempty"`
+	ContextWindow          int    `json:"context_window,omitempty"`
+	ContextWindowEstimated bool   `json:"context_window_estimated,omitempty"`
+	// MaxToolIterations is the fuse as it applies, not as it was asked for: the
+	// default resolved, and negative for a caller that removed it.
+	MaxToolIterations int    `json:"max_tool_iterations,omitempty"`
+	RetryBudget       string `json:"retry_budget,omitempty"`
+	StreamIdleTimeout string `json:"stream_idle_timeout,omitempty"`
 }
 
 type ModelChanged struct {
