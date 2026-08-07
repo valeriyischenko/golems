@@ -138,7 +138,7 @@ func runMain() (returnErr error) {
 	if err != nil {
 		return asConfigError(err)
 	}
-	cfg.ExternalTools, cfg.SandboxGrants = toolConfig.Tools, toolConfig.Sandbox
+	cfg.ExternalTools, cfg.SandboxGrants, cfg.ToolEnv = toolConfig.Tools, toolConfig.Sandbox, toolConfig.Env
 	store, err := state.Open(cfg.Home)
 	if err != nil {
 		return fmt.Errorf("initialize state: %w", err)

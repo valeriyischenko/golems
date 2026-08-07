@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ type SecurityState struct {
 	EffectivePolicy string
 	Container       string
 	Grants          toolruntime.SandboxGrants
+	EnvNames        []string
 }
 
 type containerProbe struct {
@@ -57,7 +60,7 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 		container = detectContainer(ctx)
 	}
 	effectivePolicy := effectiveSandboxPolicy(cfg.SandboxPolicy, container)
-	state := SecurityState{EffectivePolicy: effectivePolicy, Grants: cfg.SandboxGrants}
+	state := SecurityState{EffectivePolicy: effectivePolicy, Grants: cfg.SandboxGrants, EnvNames: slices.Sorted(maps.Keys(cfg.ToolEnv))}
 	if effectivePolicy == sandboxOff {
 		state.Container = container
 		return state
@@ -73,6 +76,7 @@ func buildSecurityState(ctx context.Context, cfg Config, root string, store *sta
 		ToolHome:  toolruntime.WorkspaceToolHome(stateHome, root),
 		StateHome: stateHome,
 		Grants:    cfg.SandboxGrants,
+		Env:       cfg.ToolEnv,
 	}
 	probeDir := stateHome
 	if store != nil {
@@ -180,6 +184,7 @@ func (s SecurityState) Journal(requested string) session.SandboxState {
 		Probe:     s.Probe,
 		Container: s.Container,
 		Grants:    s.Grants.Journal(),
+		EnvNames:  s.EnvNames,
 	}
 }
 

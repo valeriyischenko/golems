@@ -41,7 +41,7 @@ func sandboxBackend() string { return "landlock" }
 // outside it.
 func sandboxedCommand(box Sandbox, program string, args []string, workdir string) (*exec.Cmd, error) {
 	if box.Policy == sandboxOff {
-		return ambientCommand(program, args, workdir, box.ToolHome), nil
+		return ambientCommand(box, program, args, workdir), nil
 	}
 	encodedArgs, err := json.Marshal(args)
 	if err != nil {
@@ -57,7 +57,7 @@ func sandboxedCommand(box Sandbox, program string, args []string, workdir string
 	}
 	cmd := exec.Command("/proc/self/exe", sandboxChildArg)
 	cmd.Dir = workdir
-	cmd.Env = append(minimalToolEnv(box.ToolHome),
+	cmd.Env = append(box.environ(),
 		envSandboxProgram+"="+program,
 		envSandboxArgs+"="+string(encodedArgs),
 		envSandboxFence+"="+string(encodedFence),
@@ -67,7 +67,7 @@ func sandboxedCommand(box Sandbox, program string, args []string, workdir string
 
 func sandboxedBashCommand(box Sandbox, command, workdir string) (*exec.Cmd, error) {
 	if box.Policy == sandboxOff {
-		return ambientBashCommand(command, workdir), nil
+		return ambientBashCommand(box, command, workdir), nil
 	}
 	bash := systemBashPath()
 	if bash == "" {
@@ -99,7 +99,7 @@ func runSandboxedProgram() {
 	}
 	// The control variables are deliberately not passed on: the program runs
 	// with the same scrubbed environment it would have had without them.
-	if err := syscall.Exec(program, args, minimalToolEnv(box.ToolHome)); err != nil {
+	if err := syscall.Exec(program, args, box.environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox exec %s: %v\n", program, err)
 		os.Exit(126)
 	}

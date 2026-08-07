@@ -60,10 +60,13 @@ type Config struct {
 	// SandboxGrants is the run-level part of the same file: what every tool
 	// process may reach beyond the built-in ruleset, Bash included.
 	SandboxGrants toolruntime.SandboxGrants
-	Security      SecurityState
-	PrintMode     bool
-	SaveSession   bool
-	Ephemeral     bool
+	// ToolEnv is the variables that file hands every tool process, which is the
+	// only way anything the deployment set around Cy reaches one.
+	ToolEnv     map[string]string
+	Security    SecurityState
+	PrintMode   bool
+	SaveSession bool
+	Ephemeral   bool
 }
 
 func LoadConfig() Config {

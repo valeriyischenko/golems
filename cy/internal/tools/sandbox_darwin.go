@@ -26,30 +26,30 @@ func systemBashPath() string { return "/bin/bash" }
 // its own path as the process name.
 func sandboxedCommand(box Sandbox, program string, args []string, workdir string) (*exec.Cmd, error) {
 	if box.Policy == sandboxOff {
-		return ambientCommand(program, args, workdir, box.ToolHome), nil
+		return ambientCommand(box, program, args, workdir), nil
 	}
 	if _, err := os.Stat(sandboxExecPath); err != nil {
 		if box.Policy == sandboxOn {
 			return nil, errors.New("macOS sandbox-exec is unavailable")
 		}
-		return ambientCommand(program, args, workdir, box.ToolHome), nil
+		return ambientCommand(box, program, args, workdir), nil
 	}
 	sandboxArgs := append([]string{"-p", seatbeltProfile(box), program}, args[1:]...)
 	cmd := exec.Command(sandboxExecPath, sandboxArgs...)
 	cmd.Dir = workdir
-	cmd.Env = minimalToolEnv(box.ToolHome)
+	cmd.Env = box.environ()
 	return cmd, nil
 }
 
 func sandboxedBashCommand(box Sandbox, command, workdir string) (*exec.Cmd, error) {
 	if box.Policy == sandboxOff {
-		return ambientBashCommand(command, workdir), nil
+		return ambientBashCommand(box, command, workdir), nil
 	}
 	if _, err := os.Stat(sandboxExecPath); err != nil {
 		if box.Policy == sandboxOn {
 			return nil, errors.New("macOS sandbox-exec is unavailable")
 		}
-		return ambientBashCommand(command, workdir), nil
+		return ambientBashCommand(box, command, workdir), nil
 	}
 	return sandboxedCommand(box, systemBashPath(), []string{systemBashPath(), "-lc", command}, workdir)
 }

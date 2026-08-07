@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,12 @@ type Sandbox struct {
 	// sandbox has one ruleset for the lot and cannot tell Cy from Cy's children.
 	StateHome string
 	Grants    SandboxGrants
+	// Env is what configuration adds to the scrubbed environment every tool
+	// process gets. A tool that has to reach the network through a proxy learns
+	// about it here and nowhere else: the environment is deliberately built from
+	// nothing rather than inherited, so a variable the deployment set for Cy
+	// does not reach a shell Cy spawned unless it is named.
+	Env map[string]string
 }
 
 // SandboxGrants is what configuration adds to, and takes away from, the fence
@@ -55,7 +62,6 @@ type SandboxGrants struct {
 	Hide  []string `json:"hide,omitempty"`
 }
 
-// journal is these grants in the shape the session record keeps them.
 // Journal is this set of grants as the session should record them: the paths as
 // resolved at startup, so a reader of the file sees what the fence was built
 // from rather than what the configuration said before resolution.
@@ -78,14 +84,28 @@ func (g SandboxGrants) merge(over SandboxGrants) SandboxGrants {
 	}
 }
 
-// With returns this sandbox with a tool's own grants folded in, for the one
-// tool that declared them.
-func (s Sandbox) With(grants SandboxGrants) Sandbox {
-	if grants.empty() {
-		return s
+// With returns this sandbox with a tool's own grants and variables folded in,
+// for the one tool that declared them. A variable named at both levels takes
+// the tool's value, which is the narrower statement of the two.
+func (s Sandbox) With(grants SandboxGrants, env map[string]string) Sandbox {
+	if !grants.empty() {
+		s.Grants = s.Grants.merge(grants)
 	}
-	s.Grants = s.Grants.merge(grants)
+	if len(env) > 0 {
+		merged := maps.Clone(s.Env)
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		maps.Copy(merged, env)
+		s.Env = merged
+	}
 	return s
+}
+
+// environ is the environment a tool process runs with: the scrubbed minimum
+// plus whatever configuration named, in that order so a configured value wins.
+func (s Sandbox) environ() []string {
+	return appendExternalEnv(minimalToolEnv(s.ToolHome), s.Env)
 }
 
 // Command builds a command that runs program under this platform's fence.
@@ -109,9 +129,16 @@ func (s Sandbox) BashCommand(command, workdir string) (*exec.Cmd, error) {
 	return sandboxedBashCommand(s, command, workdir)
 }
 
-func ambientBashCommand(command, workdir string) *exec.Cmd {
+// ambientBashCommand runs the shell with no fence around it, inheriting this
+// process's environment as an unsandboxed shell always has. Configured
+// variables are still laid over it: they are a statement about how tools reach
+// the world, and losing the fence is no reason to stop making it.
+func ambientBashCommand(box Sandbox, command, workdir string) *exec.Cmd {
 	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = workdir
+	if len(box.Env) > 0 {
+		cmd.Env = appendExternalEnv(os.Environ(), box.Env)
+	}
 	return cmd
 }
 
@@ -120,11 +147,11 @@ func ambientBashCommand(command, workdir string) *exec.Cmd {
 // inherited this process's environment when unsandboxed — a program launched
 // from configuration gets the scrubbed environment either way. Losing the
 // fence should not also mean handing it the supervisor's credentials.
-func ambientCommand(program string, args []string, workdir, home string) *exec.Cmd {
+func ambientCommand(box Sandbox, program string, args []string, workdir string) *exec.Cmd {
 	cmd := exec.Command(program, args[1:]...)
 	cmd.Args = args
 	cmd.Dir = workdir
-	cmd.Env = minimalToolEnv(home)
+	cmd.Env = box.environ()
 	return cmd
 }
 

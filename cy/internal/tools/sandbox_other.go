@@ -20,14 +20,14 @@ func sandboxedCommand(box Sandbox, program string, args []string, workdir string
 	if box.Policy == sandboxOn {
 		return nil, errors.New("sandbox is unavailable on " + runtime.GOOS)
 	}
-	return ambientCommand(program, args, workdir, box.ToolHome), nil
+	return ambientCommand(box, program, args, workdir), nil
 }
 
 func sandboxedBashCommand(box Sandbox, command, workdir string) (*exec.Cmd, error) {
 	if box.Policy == sandboxOn {
 		return nil, errors.New("sandbox is unavailable on " + runtime.GOOS)
 	}
-	return ambientBashCommand(command, workdir), nil
+	return ambientBashCommand(box, command, workdir), nil
 }
 
 func hardenSupervisor() {}

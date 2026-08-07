@@ -217,16 +217,27 @@ responsible; `--home` or `CY_HOME` is how to move out of it.
 What tool processes may reach beyond that is configuration. A `sandbox` block
 in `tools.json` takes three lists — `read`, `write`, and `hide` — at the top
 level, where it applies to every tool process including Bash, and inside a tool
-declaration, where it applies to that tool alone and adds to the top-level one:
+declaration, where it applies to that tool alone and adds to the top-level one.
+An `env` block sits beside it and works the same way:
 
 ```json
 {
   "sandbox": {"read": ["pyenv"], "hide": ["secrets"]},
-  "tools": [{"name": "pytest", "sandbox": {"write": ["~/.cache/pytest"]}}]
+  "env": {"https_proxy": "http://proxy:3128"},
+  "tools": [{"name": "pytest", "sandbox": {"write": ["~/.cache/pytest"]},
+             "env": {"PYTHONHASHSEED": "0"}}]
 }
 ```
 
 (the rest of a tool declaration is elided)
+
+`env` is the only way anything the deployment set around Cy reaches a tool: the
+environment is built from nothing rather than inherited, so provider
+credentials cannot leak into a shell the model wrote. On a host that reaches
+the network through a proxy that means `curl` inside Bash works only once the
+proxy variables are named here. `HOME` and `TMPDIR` are refused, since they are
+how the fence tells a tool where it may write. The variable names are recorded
+in the session; the values are not.
 
 A relative path resolves against the directory holding `tools.json`, so a
 deployment can be moved without editing it; `~/…` is the invoking user's home,

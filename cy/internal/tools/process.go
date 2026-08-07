@@ -154,6 +154,9 @@ type ProcessOptions struct {
 	// every tool process runs behind. A tool's own block is folded in per call;
 	// this is the part Bash gets too.
 	Grants SandboxGrants
+	// Env is what the tools file gives every tool process on top of the scrubbed
+	// environment, Bash included, for the same reason.
+	Env map[string]string
 	// Background says whether the model may ask for work that outlives its
 	// tool call.
 	Background bool
@@ -205,6 +208,7 @@ func NewProcessManager(opts ProcessOptions) (*ProcessManager, error) {
 			ToolHome:  toolHome,
 			StateHome: opts.Home,
 			Grants:    opts.Grants,
+			Env:       opts.Env,
 		},
 		allowBackground: opts.Background,
 		stopped:         make(chan struct{}),

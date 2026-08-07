@@ -116,8 +116,13 @@ func (b *BackgroundMode) UnmarshalJSON(raw []byte) error {
 // per-tool blocks have to live beside the tools anyway, and two files that must
 // agree about the same vocabulary is one more thing to get wrong.
 type ToolConfig struct {
-	Sandbox SandboxGrants  `json:"sandbox,omitzero"`
-	Tools   []ExternalTool `json:"tools"`
+	Sandbox SandboxGrants `json:"sandbox,omitzero"`
+	// Env is given to every tool process this run, Bash included. A sandboxed
+	// process starts from an empty environment, so anything the deployment set
+	// around Cy -- a proxy above all, which is how a fenced host lets anything
+	// out at all -- is invisible to tools until it is named here.
+	Env   map[string]string `json:"env,omitempty"`
+	Tools []ExternalTool    `json:"tools"`
 }
 
 // LoadExternalTools reads the tool declarations at path. No file means no
@@ -148,6 +153,9 @@ func LoadExternalTools(path string) (ToolConfig, error) {
 	}
 	base := filepath.Dir(path)
 	if err := file.Sandbox.resolve(base); err != nil {
+		return ToolConfig{}, fmt.Errorf("tool config %s: %w", path, err)
+	}
+	if err := validateToolEnv(file.Env); err != nil {
 		return ToolConfig{}, fmt.Errorf("tool config %s: %w", path, err)
 	}
 	declared := make(map[string]bool, len(file.Tools))
@@ -232,7 +240,14 @@ func (t *ExternalTool) normalize(base string) error {
 	if filepath.IsAbs(t.Workdir) {
 		return fmt.Errorf("workdir %q must be relative to the workspace root", t.Workdir)
 	}
-	for key := range t.Env {
+	if err := validateToolEnv(t.Env); err != nil {
+		return err
+	}
+	return t.Sandbox.resolve(base)
+}
+
+func validateToolEnv(env map[string]string) error {
+	for key := range env {
 		switch {
 		case strings.TrimSpace(key) == "" || strings.ContainsRune(key, '='):
 			return fmt.Errorf("env name %q is not a variable name", key)
@@ -246,7 +261,7 @@ func (t *ExternalTool) normalize(base string) error {
 			return fmt.Errorf("env %s is reserved", key)
 		}
 	}
-	return t.Sandbox.resolve(base)
+	return nil
 }
 
 func (t ExternalTool) timeout() time.Duration {
@@ -436,7 +451,7 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		}
 
 		m.mu.Lock()
-		box := m.sandbox.With(declaration.Sandbox)
+		box := m.sandbox.With(declaration.Sandbox, declaration.Env)
 		m.mu.Unlock()
 
 		// The same fence as Bash, and the same one for every tool that did not
@@ -447,7 +462,6 @@ func (m *processManager) externalRunner(declaration ExternalTool, program string
 		if err != nil {
 			return golem.ToolResult{}, fmt.Errorf("%w: %s: %v", golem.ErrToolFatal, declaration.Name, err)
 		}
-		command.Env = appendExternalEnv(command.Env, declaration.Env)
 
 		// A managed job like any other, so that a configured program gets the
 		// supervisor, the mailbox and the bounded output that a shell command

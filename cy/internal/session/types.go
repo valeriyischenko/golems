@@ -59,6 +59,12 @@ type SandboxState struct {
 	// with. That resolution is the part a reader cannot redo, since it depended
 	// on where the tools file was and who ran Cy.
 	Grants SandboxGrants `json:"grants,omitzero"`
+	// EnvNames are the variables configuration handed every tool process, named
+	// but not valued: a proxy address is one thing, and the token some
+	// deployments put in it is another. Recorded because a tool that could reach
+	// the network and a tool that could not is the difference between two runs
+	// that otherwise read identically.
+	EnvNames []string `json:"env_names,omitempty"`
 }
 
 // SandboxGrants is the paths configuration added to, and took away from, a

@@ -89,6 +89,7 @@ func TestLoadExternalToolsRejectsBadDeclarations(t *testing.T) {
 		{"absolute workdir", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"workdir":"/etc"}]}`, "workdir"},
 		{"overrides HOME", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"HOME":"/root"}}]}`, "HOME"},
 		{"reserved env", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"env":{"CY_INTERNAL_SANDBOX_POLICY":"off"}}]}`, "reserved"},
+		{"run-level env overrides TMPDIR", `{"env":{"TMPDIR":"/tmp"},"tools":[]}`, "TMPDIR"},
 		{"unknown background", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":"sometimes"}]}`, "background"},
 		{"background is not a number", `{"tools":[{"name":"t","description":"d","effect":"read","command":["x"],"background":3}]}`, "background"},
 		// auto writes a background flag into the tool's schema, and a tool that

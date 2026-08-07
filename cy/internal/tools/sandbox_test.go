@@ -84,6 +84,38 @@ func TestSandboxGrantsMergeKeepsBothHides(t *testing.T) {
 	}
 }
 
+// The variable a fenced deployment cannot work without: a tool process starts
+// from an empty environment, so a proxy Cy itself was given reaches nothing it
+// spawns until configuration names it. Checked through the fence rather than on
+// the command, because on Linux the environment the tool ends up with is built
+// on the far side of a re-exec and not by the caller.
+func TestSandboxEnvReachesTheToolProcess(t *testing.T) {
+	if SandboxBackend() == "" {
+		t.Skip("no platform sandbox")
+	}
+	root, toolHome := t.TempDir(), t.TempDir()
+	box := Sandbox{
+		Policy:    sandboxOn,
+		Workspace: root,
+		ToolHome:  toolHome,
+		Env:       map[string]string{"https_proxy": "http://proxy.invalid:3128"},
+	}
+	// Folded in the way a tool's own block is, so the merge is on the same path
+	// the run takes rather than only the run-level field.
+	box = box.With(SandboxGrants{}, map[string]string{"CY_TEST_TOOL": "tool"})
+	cmd, err := box.BashCommand(`printf '%s %s\n' "$https_proxy" "$CY_TEST_TOOL"`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed bash failed: %v: %s", err, output)
+	}
+	if got, want := strings.TrimSpace(string(output)), "http://proxy.invalid:3128 tool"; got != want {
+		t.Fatalf("environment = %q, want %q", got, want)
+	}
+}
+
 // The two grants a configured tool actually needs, checked through the fence
 // rather than through the plan: an interpreter's packages made readable outside
 // the workspace, and one directory inside that grant kept out of reach.
