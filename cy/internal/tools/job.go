@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,17 +14,24 @@ import (
 // job's supervisor.
 const jobChildArg = "__cy_job_run"
 
-const jobResultFile = "result.json"
+const (
+	jobResultFile = "result.json"
+	jobOutputFile = "output"
+)
 
 // jobResult is a job's fate as a file: written by the supervisor, read by
 // whichever Cy asks next, which is not necessarily the one that started it.
+//
+// OutputBytes counts everything the job printed, not what was kept, so a reader
+// of the output file beside this one can still say how much went missing.
 type jobResult struct {
-	Status     string    `json:"status"`
-	ExitCode   *int      `json:"exit_code,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	Pid        int       `json:"pid,omitempty"`
-	StartedAt  time.Time `json:"started_at,omitzero"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Status      string    `json:"status"`
+	ExitCode    *int      `json:"exit_code,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Pid         int       `json:"pid,omitempty"`
+	OutputBytes int64     `json:"output_bytes,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	FinishedAt  time.Time `json:"finished_at,omitzero"`
 }
 
 // RunJobChildIfRequested turns this process into a job's supervisor when Cy
@@ -62,22 +70,36 @@ func superviseJob(mailbox, program string, args []string) int {
 	started := time.Now().UTC()
 	command := exec.Command(program, args...)
 	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
+	// Passed through to Cy as before and kept a second time, because the copy
+	// Cy holds dies with Cy. The same writer for both streams is what makes
+	// os/exec give the child one pipe rather than two, so the interleaving the
+	// job produced is the interleaving both readers see.
+	log := &jobBuffer{limit: defaultCommandLogLimit}
+	command.Stdout = io.MultiWriter(os.Stdout, log)
+	command.Stderr = command.Stdout
 	waitErr := command.Run()
 
+	stored, discarded := log.stats()
 	result := jobResult{
-		Status:     jobCompleted,
-		ExitCode:   processExitCode(waitErr),
-		Error:      processErrorText(waitErr),
-		StartedAt:  started,
-		FinishedAt: time.Now().UTC(),
+		Status:      jobCompleted,
+		ExitCode:    processExitCode(waitErr),
+		Error:       processErrorText(waitErr),
+		OutputBytes: stored + discarded,
+		StartedAt:   started,
+		FinishedAt:  time.Now().UTC(),
 	}
 	if waitErr != nil {
 		result.Status = jobFailed
 	}
 	if command.Process != nil {
 		result.Pid = command.Process.Pid
+	}
+	// Output first. The result file is the marker that says the job is over, so
+	// publishing it last is what makes "there is a result" also mean "the output
+	// beside it is complete".
+	tail, _ := log.snapshot(0)
+	if err := writeJobFile(mailbox, jobOutputFile, tail); err != nil {
+		fmt.Fprintf(os.Stderr, "job: record output: %v\n", err)
 	}
 	if err := writeJobResult(mailbox, result); err != nil {
 		fmt.Fprintf(os.Stderr, "job: record result: %v\n", err)
@@ -102,18 +124,22 @@ func superviseCommand(launcher []string, mailbox string, command *exec.Cmd) *exe
 	return supervised
 }
 
-// writeJobResult publishes through a rename, so a reader sees either a whole
-// result or none. The reader can be a different process.
 func writeJobResult(mailbox string, result jobResult) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	temporary := filepath.Join(mailbox, jobResultFile+".tmp")
-	if err := os.WriteFile(temporary, append(raw, '\n'), 0o600); err != nil {
+	return writeJobFile(mailbox, jobResultFile, append(raw, '\n'))
+}
+
+// writeJobFile publishes through a rename, so a reader sees either the whole
+// file or none of it. The reader can be a different process.
+func writeJobFile(mailbox, name string, data []byte) error {
+	temporary := filepath.Join(mailbox, name+".tmp")
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(temporary, filepath.Join(mailbox, jobResultFile))
+	return os.Rename(temporary, filepath.Join(mailbox, name))
 }
 
 // readJobResult reports what a supervisor left behind, and whether it left
@@ -132,4 +158,17 @@ func readJobResult(mailbox string) (jobResult, bool) {
 		return jobResult{}, false
 	}
 	return result, true
+}
+
+// readJobOutput reports the tail the supervisor kept. Only ever present next to
+// a result: while the job runs, the output exists solely in the pipe.
+func readJobOutput(mailbox string) ([]byte, bool) {
+	if mailbox == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(filepath.Join(mailbox, jobOutputFile))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }

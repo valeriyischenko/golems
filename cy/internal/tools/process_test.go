@@ -278,6 +278,57 @@ func TestAConfiguredLauncherSupervisesTheJobAndItsResultIsWhatCyReads(t *testing
 	}
 }
 
+func TestASupervisorLeavesTheJobsOutputBesideItsResult(t *testing.T) {
+	manager := processManagerForTest(t)
+	id := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "printf 'on stdout'; printf 'and on stderr' >&2", Background: true}))
+	<-manager.get(id).done
+
+	tail, ok := readJobOutput(manager.mailboxFor(id))
+	if !ok {
+		t.Fatalf("no output in the mailbox at %s", manager.mailboxFor(id))
+	}
+	// Both streams, because the supervisor gives the job one pipe for the two.
+	if !strings.Contains(string(tail), "on stdout") || !strings.Contains(string(tail), "and on stderr") {
+		t.Fatalf("recorded output = %q", tail)
+	}
+	if result, _ := readJobResult(manager.mailboxFor(id)); result.OutputBytes != int64(len(tail)) {
+		t.Fatalf("output_bytes = %d, want %d", result.OutputBytes, len(tail))
+	}
+}
+
+func TestTheOutputCyReportsIsTheSupervisorsFileNotThePipeItAlsoHeld(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is unavailable")
+	}
+	// A launcher that reports output the program never printed, and claims more
+	// of it was cut than there is. Nothing else distinguishes the file from the
+	// pipe this process was holding at the same time.
+	launcher := filepath.Join(t.TempDir(), "launcher.sh")
+	script := "#!/bin/sh\nmailbox=$1; shift\n\"$@\"\n" +
+		"printf 'from the file' > \"$mailbox/output\"\n" +
+		"printf '{\"status\":\"completed\",\"exit_code\":0,\"output_bytes\":1014}\\n' > \"$mailbox/result.json\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewProcessManager(ProcessOptions{Root: t.TempDir(), Home: t.TempDir(), Sandbox: sandboxOff, Background: true, JobLauncher: launcher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	id := jobIDFromText(t, runProcessTool(t, manager.bash, bashArgs{Command: "printf 'from the pipe'", Background: true}))
+	job := manager.get(id)
+	<-job.done
+
+	tail, truncated := job.log.snapshot(0)
+	if string(tail) != "from the file" || !truncated {
+		t.Fatalf("output = %q truncated = %v, want the launcher's file", tail, truncated)
+	}
+	if stored, discarded := job.log.stats(); stored != 13 || discarded != 1001 {
+		t.Fatalf("stored = %d discarded = %d, want the file's 13 of 1014", stored, discarded)
+	}
+}
+
 func TestBashCapsOutputWithoutBlockingProcess(t *testing.T) {
 	manager := processManagerForTest(t)
 	manager.logLimit = 64

@@ -546,6 +546,9 @@ func (m *processManager) monitor(job *processJob, timeout time.Duration) {
 		if !result.FinishedAt.IsZero() {
 			job.finishedAt = result.FinishedAt
 		}
+		if tail, ok := readJobOutput(job.mailbox); ok {
+			job.log.adopt(tail, result.OutputBytes)
+		}
 	}
 	job.mu.Unlock()
 	close(job.done)
@@ -817,6 +820,31 @@ func (l *jobBuffer) snapshot(limit int) ([]byte, bool) {
 		data = []byte(strings.ToValidUTF8(string(data), "�"))
 	}
 	return data, start > 0 || l.discarded > 0
+}
+
+// adopt replaces the cached tail with the supervisor's copy of it. While Cy
+// holds the pipe the two are the same bytes, so this changes nothing today; the
+// point is that from here on the file is the account of what a job printed and
+// the buffer is a cache of it, which is what lets a job be read by a Cy that
+// never held its pipe. received is everything the job printed, so a tail that
+// was cut still says how much is missing.
+//
+// Trimmed to this buffer's own bound, which is what a cache does. The two are
+// the same by default; a Cy that keeps less than the supervisor wrote should
+// still keep only that much.
+func (l *jobBuffer) adopt(data []byte, received int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.received = max(received, int64(len(data)))
+	switch {
+	case l.limit <= 0:
+		l.data = nil
+	case int64(len(data)) > l.limit:
+		l.data = data[int64(len(data))-l.limit:]
+	default:
+		l.data = data
+	}
+	l.discarded = l.received - int64(len(l.data))
 }
 
 func (l *jobBuffer) stats() (stored, discarded int64) {
